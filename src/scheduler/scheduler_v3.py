@@ -242,7 +242,7 @@ def create_incident(cursor, asset, kpi_id, kpi_name, severity_id):
         print(f"      [ERROR] Creating incident: {str(e)}")
         return None, False
 
-def store_result(cursor, asset_id, kpi_id, result, outcome_type, target_value=None):
+def store_result(cursor, asset_id, kpi_id, result, outcome_type, target_value=None, target_override=None):
     """Store KPI result in the database using UPSERT logic"""
     try:
         # Format flag value based on outcome type (true/false, seconds, MB, %)
@@ -250,12 +250,16 @@ def store_result(cursor, asset_id, kpi_id, result, outcome_type, target_value=No
         result_value = format_result_value(result, outcome_type)
         details = result.get('details', '')
 
-        target = determine_target_hit_miss(
-            result.get('value'),
-            target_value,
-            outcome_type,
-            result.get('flag')
-        )
+        # Use target_override if provided (e.g., "skipped"), otherwise calculate
+        if target_override:
+            target = target_override
+        else:
+            target = determine_target_hit_miss(
+                result.get('value'),
+                target_value,
+                outcome_type,
+                result.get('flag')
+            )
 
         cursor.execute("""
             INSERT INTO kpis_results (AssetId, KpiId, Flag, Target, Result, Details, createdAt)
@@ -350,7 +354,16 @@ def run_kpi_for_asset(cursor, asset, kpi, incident_frequency):
 
     except Exception as e:
         print(f"      [ERROR] {str(e)}")
-        return None
+
+        # Store error as skipped
+        error_result = {'flag': True, 'value': None, 'details': f"Error: {str(e)[:200]}"}
+        store_result(cursor, asset['Id'], kpi['Id'], error_result, outcome_type, target_override="skipped")
+
+        # Store in history as skipped
+        result_value = format_result_value(error_result, outcome_type)
+        store_in_results_history(cursor, asset['Id'], kpi['Id'], "skipped", result_value, f"Error: {str(e)[:200]}")
+
+        return "skipped"
 
 def run_kpis_by_frequency(frequency_filter):
     """Run all KPIs that match the given frequency"""
@@ -400,13 +413,26 @@ def run_kpis_by_frequency(frequency_filter):
         total_checks = 0
         total_hits = 0
         total_misses = 0
+        total_skipped = 0
 
         for asset in assets:
-            print(f"\n  Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'Medium'})")
+            print(f"\n  Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'})")
+            site_is_down = False
 
             for kpi in kpis:
+                kpi_name_lower = kpi['KpiName'].lower()
+
+                # If site is down, store skipped result and move to next KPI
+                if site_is_down:
+                    total_skipped += 1
+                    skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down'}
+                    store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
+                    result_value = format_result_value(skipped_result, kpi['Outcome'])
+                    store_in_results_history(cursor, asset['Id'], kpi['Id'], "skipped", result_value, 'Skipped - site is down')
+                    print(f"    [SKIP] {kpi['KpiName']} (site is down)")
+                    continue
+
                 total_checks += 1
-                symbol = "[MISS]"
                 result = run_kpi_for_asset(cursor, asset, kpi, incident_frequency)
 
                 if result == "hit":
@@ -415,14 +441,22 @@ def run_kpis_by_frequency(frequency_filter):
                 elif result == "miss":
                     total_misses += 1
                     symbol = "[MISS]"
+                elif result == "skipped":
+                    total_skipped += 1
+                    symbol = "[SKIP]"
                 else:
                     symbol = "[ERR]"
 
                 print(f"    {symbol} {kpi['KpiName']}")
 
+                # Check if this was the "site completely down" KPI and it missed
+                if 'completely down' in kpi_name_lower and result == "miss":
+                    site_is_down = True
+                    print(f"    >> Site is DOWN - skipping remaining KPIs for this asset")
+
             conn.commit()
 
-        print(f"\n  Summary: {total_checks} checks | {total_hits} hits | {total_misses} misses")
+        print(f"\n  Summary: {total_checks} checks | {total_hits} hits | {total_misses} misses | {total_skipped} skipped")
 
     except Exception as e:
         print(f"  [ERROR] {str(e)}")
