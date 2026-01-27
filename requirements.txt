@@ -1,0 +1,21 @@
+# KPI Monitoring System Dependencies
+
+# Database
+mysql-connector-python>=9.0.0
+
+# Scheduling
+APScheduler>=3.10.0
+
+# HTTP Requests
+requests>=2.31.0
+urllib3>=2.0.0
+
+# Browser Automation (for accessibility and browser-based KPIs)
+playwright>=1.40.0
+
+# SSL/TLS Certificate Parsing
+cryptography>=41.0.0
+certifi>=2023.0.0
+
+# Environment Configuration
+python-dotenv>=1.0.0
