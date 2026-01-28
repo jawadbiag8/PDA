@@ -34,6 +34,7 @@ from src.kpi_runners.dns_runner import DNSKPIRunner
 from src.kpi_runners.accessiblity_runner import AccessibilityKPIRunner
 import mysql.connector
 import certifi
+import requests
 from datetime import datetime
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -792,20 +793,36 @@ def run_kpis_by_frequency(frequency_filter):
 
         for asset in assets:
             log(f"Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'}) | URL: {asset['AssetUrl']}")
+
+            # Pre-check: is the site reachable?
             site_is_down = False
+            try:
+                resp = requests.head(asset['AssetUrl'], timeout=5, verify=False, allow_redirects=True)
+                if resp.status_code >= 500:
+                    site_is_down = True
+                    log(f"  [DOWN] Site returned HTTP {resp.status_code}")
+            except:
+                site_is_down = True
+                log(f"  [DOWN] Site unreachable")
+
+            if site_is_down:
+                all_freq_kpis = list(non_browser_kpis) + list(browser_kpis)
+                for kpi in all_freq_kpis:
+                    total_checks += 1
+                    total_skipped += 1
+                    skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down (pre-check failed)'}
+                    result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
+                    result_value = format_result_value(skipped_result, kpi['Outcome'])
+                    store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down (pre-check failed)')
+                    log(f"  [SKIP] {kpi['KpiName']} (site is down)")
+                conn.commit()
+                recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
+                conn.commit()
+                continue
 
             # Run non-browser KPIs first (they're fast)
             for kpi in non_browser_kpis:
                 kpi_name_lower = kpi['KpiName'].lower()
-
-                if site_is_down:
-                    total_skipped += 1
-                    skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down'}
-                    result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
-                    result_value = format_result_value(skipped_result, kpi['Outcome'])
-                    store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down')
-                    log(f"  [SKIP] {kpi['KpiName']} (site is down)")
-                    continue
 
                 total_checks += 1
                 result = run_kpi_for_asset(cursor, asset, kpi, incident_frequency)
@@ -918,6 +935,30 @@ def process_single_asset_browser_kpis(asset, browser_kpis, incident_frequency):
     try:
         log(f"[PARALLEL] Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'}) | URL: {asset['AssetUrl']}")
 
+        # Quick pre-check: is the site reachable? Avoids launching browser for down sites
+        site_reachable = False
+        try:
+            resp = requests.head(asset['AssetUrl'], timeout=5, verify=False, allow_redirects=True)
+            site_reachable = resp.status_code < 500
+        except:
+            site_reachable = False
+
+        if not site_reachable:
+            log(f"  [DOWN] Site unreachable (HTTP HEAD failed) - skipping all browser KPIs")
+            for kpi in browser_kpis:
+                counts['checks'] += 1
+                counts['skipped'] += 1
+                skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down (pre-check failed)'}
+                result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
+                result_value = format_result_value(skipped_result, kpi['Outcome'])
+                store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down (pre-check failed)')
+                log(f"  [SKIP] {kpi['KpiName']} (site is down)")
+            conn.commit()
+            recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
+            conn.commit()
+            cursor.close()
+            return counts
+
         with SharedBrowserContext() as ctx:
             page, load_time, nav_success = ctx.navigate_to(asset['AssetUrl'])
 
@@ -1027,10 +1068,44 @@ def run_daily_kpis_parallel():
         total_misses = 0
         total_skipped = 0
 
-        # First, run non-browser KPIs sequentially (they're fast)
-        if non_browser_kpis:
-            log("Running non-browser KPIs sequentially...")
+        # Pre-check which assets are reachable (HTTP HEAD) to skip down sites entirely
+        down_asset_ids = set()
+        all_kpis = list(non_browser_kpis) + list(browser_kpis)
+
+        log("Pre-checking site availability...")
+        for asset in assets:
+            try:
+                resp = requests.head(asset['AssetUrl'], timeout=5, verify=False, allow_redirects=True)
+                if resp.status_code >= 500:
+                    down_asset_ids.add(asset['Id'])
+                    log(f"  [DOWN] {asset['AssetName']} - HTTP {resp.status_code}")
+            except:
+                down_asset_ids.add(asset['Id'])
+                log(f"  [DOWN] {asset['AssetName']} - unreachable")
+
+        if down_asset_ids:
+            log(f"{len(down_asset_ids)} assets are down - skipping all KPIs for them")
             for asset in assets:
+                if asset['Id'] in down_asset_ids:
+                    for kpi in all_kpis:
+                        total_checks += 1
+                        total_skipped += 1
+                        skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down (pre-check failed)'}
+                        result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
+                        result_value = format_result_value(skipped_result, kpi['Outcome'])
+                        store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down (pre-check failed)')
+                        log(f"  [SKIP] {asset['AssetName']} > {kpi['KpiName']} (site is down)")
+                    conn.commit()
+                    recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
+                    conn.commit()
+
+        # Filter to only reachable assets
+        reachable_assets = [a for a in assets if a['Id'] not in down_asset_ids]
+
+        # First, run non-browser KPIs sequentially (they're fast)
+        if non_browser_kpis and reachable_assets:
+            log("Running non-browser KPIs sequentially...")
+            for asset in reachable_assets:
                 for kpi in non_browser_kpis:
                     total_checks += 1
                     result = run_kpi_for_asset(cursor, asset, kpi, incident_frequency)
@@ -1044,15 +1119,15 @@ def run_daily_kpis_parallel():
 
                 conn.commit()
 
-        # Then, run browser KPIs in parallel
-        if browser_kpis:
-            log(f"Running browser KPIs in parallel ({len(assets)} assets, {PARALLEL_WORKERS} workers)...")
+        # Then, run browser KPIs in parallel (only for reachable assets)
+        if browser_kpis and reachable_assets:
+            log(f"Running browser KPIs in parallel ({len(reachable_assets)} reachable assets, {PARALLEL_WORKERS} workers)...")
 
             with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
-                # Submit all assets for parallel processing
+                # Submit only reachable assets for parallel processing
                 futures = {
                     executor.submit(process_single_asset_browser_kpis, asset, browser_kpis, incident_frequency): asset
-                    for asset in assets
+                    for asset in reachable_assets
                 }
 
                 # Collect results as they complete
