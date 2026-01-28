@@ -7,10 +7,19 @@ Frequencies supported:
 - "5 min" - runs every 5 minutes
 - "15 min" - runs every 15 minutes
 - "Daily" - runs once daily at DAILY_RUN_TIME (configurable)
+
+Usage:
+- python scheduler_v3.py --start     # Start scheduler as background process
+- python scheduler_v3.py --stop      # Stop running scheduler
+- python scheduler_v3.py --test      # Run all KPIs once (test mode)
+- python scheduler_v3.py --frequency "1 min"  # Run specific frequency only
 """
 
 import sys
 import os
+import logging
+import signal
+import subprocess
 
 # Add project root to Python path
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -43,9 +52,67 @@ DB_CONFIG = {
     "database": os.getenv("DB_NAME", "kpi_monitoring")
 }
 
+# Logging configuration
+LOG_PATH = os.getenv("LOG_PATH", "/var/logs/kpiAutomationLogs/")
+PID_FILE = os.path.join(LOG_PATH, "scheduler.pid")
+
 # Daily KPIs run time (24-hour format)
 DAILY_RUN_HOUR = 15  # 3 PM
 DAILY_RUN_MINUTE = 00  # Start of hour
+
+# ============================================================
+# LOGGING SETUP
+# ============================================================
+
+def setup_logging():
+    """Setup date-wise logging to file"""
+    # Create log directory if it doesn't exist
+    os.makedirs(LOG_PATH, exist_ok=True)
+
+    # Date-wise log file name
+    log_filename = datetime.now().strftime("%Y-%m-%d") + ".log"
+    log_file = os.path.join(LOG_PATH, log_filename)
+
+    # Configure logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S',
+        handlers=[
+            logging.FileHandler(log_file, mode='a', encoding='utf-8'),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
+
+    return logging.getLogger(__name__)
+
+# Initialize logger
+logger = setup_logging()
+
+def log(message, level="info"):
+    """Log message to both file and console"""
+    # Check if date changed, rotate log file if needed
+    current_date = datetime.now().strftime("%Y-%m-%d")
+    expected_log_file = os.path.join(LOG_PATH, f"{current_date}.log")
+
+    # Check if we need to rotate to a new date file
+    for handler in logger.handlers:
+        if isinstance(handler, logging.FileHandler):
+            if handler.baseFilename != expected_log_file:
+                # Date changed, update file handler
+                handler.close()
+                logger.removeHandler(handler)
+                new_handler = logging.FileHandler(expected_log_file, mode='a', encoding='utf-8')
+                new_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s', '%Y-%m-%d %H:%M:%S'))
+                logger.addHandler(new_handler)
+            break
+
+    if level == "error":
+        logger.error(message)
+    elif level == "warning":
+        logger.warning(message)
+    else:
+        logger.info(message)
 
 # ============================================================
 # HELPER FUNCTIONS
@@ -143,7 +210,7 @@ def check_consecutive_hits(cursor, asset_id, kpi_id, required_frequency):
 
         return all(record['Target'] == 'hit' for record in recent_results)
     except Exception as e:
-        print(f"      [ERROR] Checking consecutive hits: {str(e)}")
+        log(f"[ERROR] Checking consecutive hits: {str(e)}", "error")
         return False
 
 def auto_close_incident(cursor, asset_id, kpi_id):
@@ -175,18 +242,18 @@ def auto_close_incident(cursor, asset_id, kpi_id):
                   incident['Description'], incident['Type'], incident['SeverityId'], incident['AssignedTo']))
 
             closed_count += 1
-            print(f"      [AUTO-CLOSE] Incident #{incident['Id']} resolved")
+            log(f"[AUTO-CLOSE] Incident #{incident['Id']} resolved")
 
         return closed_count
     except Exception as e:
-        print(f"      [ERROR] Auto-closing incident: {str(e)}")
+        log(f"[ERROR] Auto-closing incident: {str(e)}", "error")
         return 0
 
 def store_in_results_history(cursor, asset_id, kpis_result_id, kpi_id, target, result_value, details):
     """Store KPI result in history table (KPIsResultHistories)"""
     try:
         if not kpis_result_id:
-            print(f"      [WARN] No kpisResults ID, skipping history insert")
+            log(f"[WARN] No kpisResults ID, skipping history insert", "warning")
             return None
 
         cursor.execute("""
@@ -195,7 +262,7 @@ def store_in_results_history(cursor, asset_id, kpis_result_id, kpi_id, target, r
         """, (asset_id, kpis_result_id, kpi_id, details, target, result_value))
         return cursor.lastrowid
     except Exception as e:
-        print(f"      [ERROR] Storing in history: {str(e)}")
+        log(f"[ERROR] Storing in history: {str(e)}", "error")
         return None
 
 def check_consecutive_failures(cursor, asset_id, kpi_id, required_frequency):
@@ -216,7 +283,7 @@ def check_consecutive_failures(cursor, asset_id, kpi_id, required_frequency):
 
         return all(record['Target'] == 'miss' for record in recent_results)
     except Exception as e:
-        print(f"      [ERROR] Checking consecutive failures: {str(e)}")
+        log(f"[ERROR] Checking consecutive failures: {str(e)}", "error")
         return False
 
 def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
@@ -253,7 +320,7 @@ def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
 
         return incident_id, True
     except Exception as e:
-        print(f"      [ERROR] Creating incident: {str(e)}")
+        log(f"[ERROR] Creating incident: {str(e)}", "error")
         return None, False
 
 def store_result(cursor, asset_id, kpi_id, result, outcome_type, target_value=None, target_override=None):
@@ -286,8 +353,222 @@ def store_result(cursor, asset_id, kpi_id, result, outcome_type, target_value=No
 
         return cursor.lastrowid
     except Exception as e:
-        print(f"      [ERROR] Storing result: {str(e)}")
+        log(f"[ERROR] Storing result: {str(e)}", "error")
         return None
+
+# ============================================================
+# ASSET METRICS CALCULATION
+# ============================================================
+
+def recalculate_asset_metrics(cursor, asset_id, citizen_impact_level):
+    """
+    Recalculate all metrics for a single asset based on last 30 days of data.
+    Called after each asset's KPI cycle completes.
+    """
+    try:
+        from datetime import timedelta
+        period_end = datetime.now()
+        period_start = period_end - timedelta(days=30)
+
+        # ----------------------------------------------------------
+        # 1. Load weight configuration from MetricWeights
+        # ----------------------------------------------------------
+        chm_weights = {}
+        cursor.execute("SELECT Name, Weight FROM MetricWeights WHERE Category = 'CHM'")
+        for row in cursor.fetchall():
+            chm_weights[row['Name']] = float(row['Weight'])
+
+        ocm_weights = {}
+        cursor.execute("SELECT Name, Weight FROM MetricWeights WHERE Category = 'OCM'")
+        for row in cursor.fetchall():
+            ocm_weights[row['Name']] = float(row['Weight'])
+
+        drei_weights = {}
+        cursor.execute("SELECT Name, Weight FROM MetricWeights WHERE Category = 'DREI'")
+        for row in cursor.fetchall():
+            drei_weights[row['Name']] = float(row['Weight'])
+
+        criticality_map = {}
+        cursor.execute("SELECT Name, Weight FROM MetricWeights WHERE Category = 'AssetCriticality'")
+        for row in cursor.fetchall():
+            criticality_map[row['Name'].upper()] = float(row['Weight'])
+
+        # ----------------------------------------------------------
+        # 2. Calculate KPI Group Indexes (hit rate per KPI, weighted)
+        # ----------------------------------------------------------
+        # Get all automated KPIs with their group and weight
+        cursor.execute("""
+            SELECT Id, KpiName, KpiGroup, Weight
+            FROM KpisLov
+            WHERE `Manual` = 'Auto' AND DeletedAt IS NULL AND KpiType IS NOT NULL
+        """)
+        all_kpis = cursor.fetchall()
+
+        # Get last 30 days of results for this asset
+        cursor.execute("""
+            SELECT KpiId, Target
+            FROM KPIsResultHistories
+            WHERE AssetId = %s AND CreatedAt >= %s AND Target IN ('hit', 'miss')
+        """, (asset_id, period_start))
+        history_rows = cursor.fetchall()
+
+        # Calculate hit rate per KPI
+        kpi_stats = {}  # {kpi_id: {'hits': 0, 'total': 0}}
+        for row in history_rows:
+            kpi_id = row['KpiId']
+            if kpi_id not in kpi_stats:
+                kpi_stats[kpi_id] = {'hits': 0, 'total': 0}
+            kpi_stats[kpi_id]['total'] += 1
+            if row['Target'] == 'hit':
+                kpi_stats[kpi_id]['hits'] += 1
+
+        # Group KPIs and calculate weighted index per group
+        group_indexes = {}
+        for kpi in all_kpis:
+            group = kpi['KpiGroup']
+            weight = kpi['Weight'] or 0
+            kpi_id = kpi['Id']
+
+            if group not in group_indexes:
+                group_indexes[group] = {'weighted_sum': 0, 'total_weight': 0}
+
+            if kpi_id in kpi_stats and kpi_stats[kpi_id]['total'] > 0:
+                hit_rate = (kpi_stats[kpi_id]['hits'] / kpi_stats[kpi_id]['total']) * 100
+            else:
+                hit_rate = 0  # No data = 0
+
+            group_indexes[group]['weighted_sum'] += hit_rate * weight
+            group_indexes[group]['total_weight'] += weight
+
+        # Calculate final index per group (0-100)
+        group_scores = {}
+        for group, data in group_indexes.items():
+            if data['total_weight'] > 0:
+                group_scores[group] = data['weighted_sum'] / data['total_weight']
+            else:
+                group_scores[group] = 0
+
+        accessibility_idx = group_scores.get('Accessibility & Inclusivity', 0)
+        availability_idx = group_scores.get('Availability & Reliability', 0)
+        navigation_idx = group_scores.get('Navigation & Discoverability', 0)
+        performance_idx = group_scores.get('Performance & Efficiency', 0)
+        security_idx = group_scores.get('Security, Trust & Privacy', 0)
+        ux_idx = group_scores.get('User Experience & Journey Quality', 0)
+
+        # ----------------------------------------------------------
+        # 3. Calculate CHM (Citizen Happiness Metric)
+        # ----------------------------------------------------------
+        chm_total_weight = sum(chm_weights.values())
+        chm = 0
+        if chm_total_weight > 0:
+            for group, weight in chm_weights.items():
+                chm += group_scores.get(group, 0) * weight
+            chm /= chm_total_weight
+
+        # ----------------------------------------------------------
+        # 4. Calculate OCM (Overall Compliance Metric)
+        # ----------------------------------------------------------
+        ocm_total_weight = sum(ocm_weights.values())
+        ocm = 0
+        if ocm_total_weight > 0:
+            for group, weight in ocm_weights.items():
+                ocm += group_scores.get(group, 0) * weight
+            ocm /= ocm_total_weight
+
+        # ----------------------------------------------------------
+        # 5. Calculate DREI (Digital Risk Exposure Index)
+        # ----------------------------------------------------------
+        # Get severity names for mapping
+        severity_map = {}  # {severity_id: severity_name}
+        cursor.execute("SELECT Id, Name FROM CommonLookup WHERE Type = 'SeverityLevel'")
+        for row in cursor.fetchall():
+            severity_map[row['Id']] = row['Name']
+
+        # Count incidents by severity (all time for this asset)
+        cursor.execute("""
+            SELECT SeverityId, Status, COUNT(*) as cnt
+            FROM Incidents
+            WHERE AssetId = %s AND DeletedAt IS NULL
+            GROUP BY SeverityId, Status
+        """, (asset_id,))
+
+        incident_counts = {}  # {'P1': {'open': 0, 'total': 0}, ...}
+        for row in cursor.fetchall():
+            sev_name = severity_map.get(row['SeverityId'], '')
+            if sev_name not in incident_counts:
+                incident_counts[sev_name] = {'open': 0, 'total': 0}
+            incident_counts[sev_name]['total'] += row['cnt']
+            if row['Status'] == 'Open':
+                incident_counts[sev_name]['open'] += row['cnt']
+
+        # Map severity names to DREI categories
+        # P1=Critical, P2=High, P3=Medium, P4=Low
+        sev_to_drei = {'P1': 'OpenCritical', 'P2': 'OpenHigh', 'P3': 'OpenMedium', 'P4': 'OpenLow'}
+
+        drei_component = 0
+        for sev_name, drei_key in sev_to_drei.items():
+            data = incident_counts.get(sev_name, {'open': 0, 'total': 0})
+            ratio = (data['open'] / data['total'] * 100) if data['total'] > 0 else 0
+            drei_component += ratio * drei_weights.get(drei_key, 0)
+
+        # SLA Breach: % of misses in last 30 days
+        total_checks = sum(s['total'] for s in kpi_stats.values())
+        total_hits = sum(s['hits'] for s in kpi_stats.values())
+        total_misses = total_checks - total_hits
+        sla_breach_pct = (total_misses / total_checks * 100) if total_checks > 0 else 0
+        drei_component += sla_breach_pct * drei_weights.get('SLABreach', 0)
+
+        drei_total_weight = sum(drei_weights.values())
+        raw_drei = drei_component / drei_total_weight if drei_total_weight > 0 else 0
+
+        # Apply asset criticality
+        level = (citizen_impact_level or '').upper()
+        asset_criticality_pct = 30  # default Low
+        for crit_level, crit_pct in criticality_map.items():
+            if level.startswith(crit_level):
+                asset_criticality_pct = crit_pct
+                break
+
+        drei = raw_drei * (asset_criticality_pct / 100)
+
+        # ----------------------------------------------------------
+        # 6. Calculate Current Health
+        # ----------------------------------------------------------
+        current_health = (ocm + (100 - drei)) / 2
+
+        # ----------------------------------------------------------
+        # 7. UPSERT into AssetMetrics
+        # ----------------------------------------------------------
+        cursor.execute("""
+            INSERT INTO AssetMetrics (AssetId, AccessibilityIndex, AvailabilityIndex, NavigationIndex,
+                                      PerformanceIndex, SecurityIndex, UserExperienceIndex,
+                                      CitizenHappinessMetric, OverallComplianceMetric,
+                                      DigitalRiskExposureIndex, CurrentHealth,
+                                      PeriodStartDate, PeriodEndDate, CalculatedAt)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+            ON DUPLICATE KEY UPDATE
+                AccessibilityIndex = VALUES(AccessibilityIndex),
+                AvailabilityIndex = VALUES(AvailabilityIndex),
+                NavigationIndex = VALUES(NavigationIndex),
+                PerformanceIndex = VALUES(PerformanceIndex),
+                SecurityIndex = VALUES(SecurityIndex),
+                UserExperienceIndex = VALUES(UserExperienceIndex),
+                CitizenHappinessMetric = VALUES(CitizenHappinessMetric),
+                OverallComplianceMetric = VALUES(OverallComplianceMetric),
+                DigitalRiskExposureIndex = VALUES(DigitalRiskExposureIndex),
+                CurrentHealth = VALUES(CurrentHealth),
+                PeriodStartDate = VALUES(PeriodStartDate),
+                PeriodEndDate = VALUES(PeriodEndDate),
+                CalculatedAt = NOW()
+        """, (asset_id, accessibility_idx, availability_idx, navigation_idx,
+              performance_idx, security_idx, ux_idx,
+              chm, ocm, drei, current_health,
+              period_start, period_end))
+
+        log(f"[METRICS] Asset {asset_id} | Health={current_health:.1f}% | CHM={chm:.1f}% | OCM={ocm:.1f}% | DREI={drei:.1f}%")
+
+    except Exception as e:
+        log(f"[ERROR] Recalculating metrics for Asset {asset_id}: {str(e)}", "error")
 
 # ============================================================
 # KPI EXECUTION
@@ -313,7 +594,7 @@ def run_kpi_for_asset(cursor, asset, kpi, incident_frequency):
 
     runner = get_runner(kpi_type, asset_data, kpi_data)
     if not runner:
-        print(f"      [SKIP] Unknown KPI type: {kpi_type}")
+        log(f"[SKIP] Unknown KPI type: {kpi_type}", "warning")
         return None
 
     try:
@@ -351,11 +632,11 @@ def run_kpi_for_asset(cursor, asset, kpi, incident_frequency):
                 severity_id = kpi.get('SeverityId')
                 incident_id, is_new = create_incident(cursor, asset['Id'], kpi['Id'], kpi_name, severity_id)
                 if incident_id and is_new:
-                    print(f"      [INCIDENT] #{incident_id} created (after {incident_frequency} consecutive misses)")
+                    log(f"[INCIDENT] #{incident_id} created (after {incident_frequency} consecutive misses)")
                 elif incident_id:
-                    print(f"      [EXISTING] Incident #{incident_id} already open")
+                    log(f"[EXISTING] Incident #{incident_id} already open")
             else:
-                print(f"      [WAIT] Need {incident_frequency} consecutive misses")
+                log(f"[WAIT] Need {incident_frequency} consecutive misses")
         else:
             # Auto-close only after consecutive hits
             should_close = check_consecutive_hits(cursor, asset['Id'], kpi['Id'], incident_frequency)
@@ -365,7 +646,7 @@ def run_kpi_for_asset(cursor, asset, kpi, incident_frequency):
         return target
 
     except Exception as e:
-        print(f"      [ERROR] {str(e)}")
+        log(f"[ERROR] {str(e)}", "error")
 
         # Store error as skipped
         error_result = {'flag': True, 'value': None, 'details': f"Error: {str(e)[:200]}"}
@@ -382,10 +663,9 @@ def run_kpis_by_frequency(frequency_filter):
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    print(f"\n{'='*80}")
-    print(f"[{timestamp}] Running KPIs with frequency: {frequency_filter}")
-    print(f"{'='*80}")
+    log("=" * 80)
+    log(f"Running KPIs with frequency: {frequency_filter}")
+    log("=" * 80)
 
     try:
         # Get global IncidentCreationFrequency from CommonLookup
@@ -418,10 +698,10 @@ def run_kpis_by_frequency(frequency_filter):
         kpis = cursor.fetchall()
 
         if not kpis:
-            print(f"  No KPIs found with frequency: {frequency_filter}")
+            log(f"No KPIs found with frequency: {frequency_filter}", "warning")
             return
 
-        print(f"  Assets: {len(assets)} | KPIs: {len(kpis)}")
+        log(f"Assets: {len(assets)} | KPIs: {len(kpis)}")
 
         total_checks = 0
         total_hits = 0
@@ -429,7 +709,7 @@ def run_kpis_by_frequency(frequency_filter):
         total_skipped = 0
 
         for asset in assets:
-            print(f"\n  Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'})")
+            log(f"Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'})")
             site_is_down = False
 
             for kpi in kpis:
@@ -442,7 +722,7 @@ def run_kpis_by_frequency(frequency_filter):
                     result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
                     result_value = format_result_value(skipped_result, kpi['Outcome'])
                     store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down')
-                    print(f"    [SKIP] {kpi['KpiName']} (site is down)")
+                    log(f"  [SKIP] {kpi['KpiName']} (site is down)")
                     continue
 
                 total_checks += 1
@@ -460,19 +740,23 @@ def run_kpis_by_frequency(frequency_filter):
                 else:
                     symbol = "[ERR]"
 
-                print(f"    {symbol} {kpi['KpiName']}")
+                log(f"  {symbol} {kpi['KpiName']}")
 
                 # Check if this was the "site completely down" KPI and it missed
                 if 'completely down' in kpi_name_lower and result == "miss":
                     site_is_down = True
-                    print(f"    >> Site is DOWN - skipping remaining KPIs for this asset")
+                    log(f"  >> Site is DOWN - skipping remaining KPIs for this asset")
 
             conn.commit()
 
-        print(f"\n  Summary: {total_checks} checks | {total_hits} hits | {total_misses} misses | {total_skipped} skipped")
+            # Recalculate metrics for this asset after all KPIs are done
+            recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
+            conn.commit()
+
+        log(f"Summary: {total_checks} checks | {total_hits} hits | {total_misses} misses | {total_skipped} skipped")
 
     except Exception as e:
-        print(f"  [ERROR] {str(e)}")
+        log(f"[ERROR] {str(e)}", "error")
     finally:
         cursor.close()
         conn.close()
@@ -503,31 +787,90 @@ def job_daily():
 
 def run_all_now():
     """Run all KPIs immediately (for testing)"""
-    print("\n" + "="*80)
-    print("RUNNING ALL KPIs (TEST MODE)")
-    print("="*80)
+    log("=" * 80)
+    log("RUNNING ALL KPIs (TEST MODE)")
+    log("=" * 80)
 
     frequencies = ["1 min", "5 min", "15 min", "Daily"]
     for freq in frequencies:
         run_kpis_by_frequency(freq)
 
-    print("\n" + "="*80)
-    print("ALL KPIs COMPLETED")
-    print("="*80)
+    log("=" * 80)
+    log("ALL KPIs COMPLETED")
+    log("=" * 80)
+
+def write_pid_file():
+    """Write current process PID to file"""
+    os.makedirs(LOG_PATH, exist_ok=True)
+    with open(PID_FILE, 'w') as f:
+        f.write(str(os.getpid()))
+    log(f"PID file created: {PID_FILE} (PID: {os.getpid()})")
+
+def remove_pid_file():
+    """Remove PID file on shutdown"""
+    if os.path.exists(PID_FILE):
+        os.remove(PID_FILE)
+        log("PID file removed")
+
+def get_running_pid():
+    """Get PID of running scheduler, or None if not running"""
+    if not os.path.exists(PID_FILE):
+        return None
+    try:
+        with open(PID_FILE, 'r') as f:
+            pid = int(f.read().strip())
+        # Check if process is actually running
+        if sys.platform == 'win32':
+            # Windows: use tasklist
+            result = subprocess.run(['tasklist', '/FI', f'PID eq {pid}'], capture_output=True, text=True)
+            if str(pid) in result.stdout:
+                return pid
+        else:
+            # Unix: send signal 0 to check if process exists
+            os.kill(pid, 0)
+            return pid
+    except (ValueError, ProcessLookupError, OSError):
+        # PID file exists but process is not running
+        remove_pid_file()
+    return None
+
+def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully"""
+    log(f"Received signal {signum}, shutting down...")
+    remove_pid_file()
+    sys.exit(0)
 
 def start_scheduler():
     """Start the scheduler with all jobs"""
+    # Check if already running
+    existing_pid = get_running_pid()
+    if existing_pid:
+        log(f"Scheduler is already running (PID: {existing_pid})", "error")
+        print(f"Scheduler is already running (PID: {existing_pid})")
+        print(f"Use --stop to stop it first.")
+        sys.exit(1)
+
+    # Write PID file
+    write_pid_file()
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    if sys.platform != 'win32':
+        signal.signal(signal.SIGHUP, signal_handler)
+
     scheduler = BlockingScheduler()
 
-    print("\n" + "="*80)
-    print("KPI MONITORING SCHEDULER v3")
-    print("="*80)
-    print(f"\nSchedule Configuration:")
-    print(f"  - 1 min KPIs: Every 1 minute")
-    print(f"  - 5 min KPIs: Every 5 minutes")
-    print(f"  - 15 min KPIs: Every 15 minutes")
-    print(f"  - Daily KPIs: Every day at {DAILY_RUN_HOUR:02d}:{DAILY_RUN_MINUTE:02d}")
-    print(f"\nPress Ctrl+C to stop the scheduler.\n")
+    log("=" * 80)
+    log("KPI MONITORING SCHEDULER v3 - STARTED")
+    log("=" * 80)
+    log(f"Schedule Configuration:")
+    log(f"  - 1 min KPIs: Every 1 minute")
+    log(f"  - 5 min KPIs: Every 5 minutes")
+    log(f"  - 15 min KPIs: Every 15 minutes")
+    log(f"  - Daily KPIs: Every day at {DAILY_RUN_HOUR:02d}:{DAILY_RUN_MINUTE:02d}")
+    log(f"Log Path: {LOG_PATH}")
+    log(f"PID File: {PID_FILE}")
 
     # Schedule jobs
     scheduler.add_job(job_1_minute, IntervalTrigger(minutes=1), id='kpi_1min', name='1-minute KPIs')
@@ -536,26 +879,122 @@ def start_scheduler():
     scheduler.add_job(job_daily, CronTrigger(hour=DAILY_RUN_HOUR, minute=DAILY_RUN_MINUTE), id='kpi_daily', name='Daily KPIs')
 
     # Run 1-minute KPIs immediately on startup
-    print("Running initial checks...")
+    log("Running initial checks...")
     job_1_minute()
 
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
-        print("\nScheduler stopped.")
+        log("Scheduler stopped.")
+        remove_pid_file()
+
+def stop_scheduler():
+    """Stop the running scheduler"""
+    pid = get_running_pid()
+    if not pid:
+        print("Scheduler is not running.")
+        log("Stop requested but scheduler is not running", "warning")
+        return
+
+    log(f"Stopping scheduler (PID: {pid})...")
+    print(f"Stopping scheduler (PID: {pid})...")
+
+    try:
+        if sys.platform == 'win32':
+            # Windows: use taskkill
+            subprocess.run(['taskkill', '/F', '/PID', str(pid)], check=True)
+        else:
+            # Unix: send SIGTERM
+            os.kill(pid, signal.SIGTERM)
+
+        # Wait a moment and verify it stopped
+        import time
+        time.sleep(2)
+
+        if get_running_pid():
+            log("Scheduler did not stop gracefully, forcing...", "warning")
+            if sys.platform == 'win32':
+                subprocess.run(['taskkill', '/F', '/PID', str(pid)], check=True)
+            else:
+                os.kill(pid, signal.SIGKILL)
+
+        remove_pid_file()
+        log("Scheduler stopped successfully")
+        print("Scheduler stopped successfully.")
+
+    except Exception as e:
+        log(f"Error stopping scheduler: {str(e)}", "error")
+        print(f"Error stopping scheduler: {str(e)}")
+
+def start_daemon():
+    """Start the scheduler as a background process"""
+    # Check if already running
+    existing_pid = get_running_pid()
+    if existing_pid:
+        print(f"Scheduler is already running (PID: {existing_pid})")
+        print(f"Use --stop to stop it first.")
+        return
+
+    log("Starting scheduler as background process...")
+    print("Starting scheduler as background process...")
+
+    # Get the path to this script
+    script_path = os.path.abspath(__file__)
+
+    if sys.platform == 'win32':
+        # Windows: use pythonw to run without console, or start /B
+        # Using subprocess with CREATE_NO_WINDOW flag
+        CREATE_NO_WINDOW = 0x08000000
+        process = subprocess.Popen(
+            [sys.executable, script_path, '--run-daemon'],
+            creationflags=CREATE_NO_WINDOW,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL
+        )
+        print(f"Scheduler started in background (PID: {process.pid})")
+        print(f"Logs are being written to: {LOG_PATH}")
+    else:
+        # Unix: fork and detach
+        pid = os.fork()
+        if pid > 0:
+            # Parent process
+            print(f"Scheduler started in background (PID: {pid})")
+            print(f"Logs are being written to: {LOG_PATH}")
+            sys.exit(0)
+        else:
+            # Child process - become daemon
+            os.setsid()
+            # Fork again to prevent zombie
+            pid = os.fork()
+            if pid > 0:
+                sys.exit(0)
+            # Now we're the daemon
+            start_scheduler()
 
 if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description='KPI Monitoring Scheduler v3')
+    parser.add_argument('--start', action='store_true', help='Start scheduler as background process')
+    parser.add_argument('--stop', action='store_true', help='Stop running scheduler')
     parser.add_argument('--test', action='store_true', help='Run all KPIs once (test mode)')
     parser.add_argument('--frequency', type=str, help='Run specific frequency only (e.g., "1 min", "5 min", "15 min", "Daily")')
+    parser.add_argument('--run-daemon', action='store_true', help=argparse.SUPPRESS)  # Internal use
 
     args = parser.parse_args()
 
-    if args.test:
+    if args.start:
+        start_daemon()
+    elif args.stop:
+        stop_scheduler()
+    elif args.test:
         run_all_now()
     elif args.frequency:
         run_kpis_by_frequency(args.frequency)
+    elif args.run_daemon:
+        # Internal: called when starting as daemon
+        start_scheduler()
     else:
+        # Default: run in foreground
         start_scheduler()

@@ -22,7 +22,7 @@ cursor = conn.cursor(dictionary=True)
 # Get the asset
 cursor.execute("""
     SELECT a.*, cl.Name as CitizenImpactLevel
-    FROM assets a
+    FROM Assets a
     LEFT JOIN CommonLookup cl ON a.CitizenImpactLevelId = cl.Id
     WHERE a.Id = %s
 """, (ASSET_ID,))
@@ -31,11 +31,12 @@ print(f"Asset: {asset['AssetName']} ({asset['AssetUrl']})")
 print(f"CitizenImpactLevel: {asset['CitizenImpactLevel']}")
 print("=" * 80)
 
-# Get ALL KPIs
+# Get ALL automated KPIs
 cursor.execute("""
     SELECT Id, KpiName, KpiGroup, KpiType, Outcome, SeverityId,
            TargetHigh, TargetMedium, TargetLow, Frequency
-    FROM KpisLov WHERE KpiType IS NOT NULL
+    FROM KpisLov
+    WHERE KpiType IS NOT NULL AND `Manual` = 'Auto' AND DeletedAt IS NULL
     ORDER BY KpiGroup, Id
 """)
 kpis = cursor.fetchall()
@@ -63,11 +64,11 @@ for kpi in kpis:
         result = runner.run()
         outcome = kpi['Outcome']
 
-        # Get target based on impact level
-        impact = asset.get('CitizenImpactLevel', 'Medium')
-        if impact == 'High':
+        # Get target based on impact level (prefix matching for CommonLookup values)
+        impact = (asset.get('CitizenImpactLevel') or '').upper()
+        if impact.startswith('HIGH'):
             tv = kpi.get('TargetHigh')
-        elif impact == 'Low':
+        elif impact.startswith('LOW'):
             tv = kpi.get('TargetLow')
         else:
             tv = kpi.get('TargetMedium')
