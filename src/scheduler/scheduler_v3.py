@@ -56,9 +56,9 @@ DB_CONFIG = {
 LOG_PATH = os.getenv("LOG_PATH", "/var/logs/kpiAutomationLogs/")
 PID_FILE = os.path.join(LOG_PATH, "scheduler.pid")
 
-# Daily KPIs run time (24-hour format)
-DAILY_RUN_HOUR = 15  # 3 PM
-DAILY_RUN_MINUTE = 00  # Start of hour
+# Daily KPIs run time (24-hour format) - configurable via .env
+DAILY_RUN_HOUR = int(os.getenv("DAILY_RUN_HOUR", "15"))  # Default: 3 PM
+DAILY_RUN_MINUTE = int(os.getenv("DAILY_RUN_MINUTE", "0"))  # Default: Start of hour
 
 # ============================================================
 # LOGGING SETUP
@@ -834,9 +834,19 @@ def get_running_pid():
         remove_pid_file()
     return None
 
+# Global scheduler instance for graceful shutdown
+_scheduler = None
+
 def signal_handler(signum, frame):
     """Handle shutdown signals gracefully"""
+    global _scheduler
     log(f"Received signal {signum}, shutting down...")
+
+    if _scheduler:
+        log("Waiting for current job to complete...")
+        _scheduler.shutdown(wait=True)  # Wait for current job to finish
+        log("Scheduler shutdown complete")
+
     remove_pid_file()
     sys.exit(0)
 
@@ -859,7 +869,8 @@ def start_scheduler():
     if sys.platform != 'win32':
         signal.signal(signal.SIGHUP, signal_handler)
 
-    scheduler = BlockingScheduler()
+    global _scheduler
+    _scheduler = BlockingScheduler()
 
     log("=" * 80)
     log("KPI MONITORING SCHEDULER v3 - STARTED")
@@ -872,18 +883,24 @@ def start_scheduler():
     log(f"Log Path: {LOG_PATH}")
     log(f"PID File: {PID_FILE}")
 
-    # Schedule jobs
-    scheduler.add_job(job_1_minute, IntervalTrigger(minutes=1), id='kpi_1min', name='1-minute KPIs')
-    scheduler.add_job(job_5_minute, IntervalTrigger(minutes=5), id='kpi_5min', name='5-minute KPIs')
-    scheduler.add_job(job_15_minute, IntervalTrigger(minutes=15), id='kpi_15min', name='15-minute KPIs')
-    scheduler.add_job(job_daily, CronTrigger(hour=DAILY_RUN_HOUR, minute=DAILY_RUN_MINUTE), id='kpi_daily', name='Daily KPIs')
+    # Schedule jobs with coalesce=True to merge missed runs, and misfire_grace_time
+    # coalesce=True: If job was missed multiple times, run only once
+    # misfire_grace_time: How many seconds late a job can be and still run
+    _scheduler.add_job(job_1_minute, IntervalTrigger(minutes=1), id='kpi_1min', name='1-minute KPIs',
+                       coalesce=True, max_instances=1, misfire_grace_time=60)
+    _scheduler.add_job(job_5_minute, IntervalTrigger(minutes=5), id='kpi_5min', name='5-minute KPIs',
+                       coalesce=True, max_instances=1, misfire_grace_time=120)
+    _scheduler.add_job(job_15_minute, IntervalTrigger(minutes=15), id='kpi_15min', name='15-minute KPIs',
+                       coalesce=True, max_instances=1, misfire_grace_time=180)
+    _scheduler.add_job(job_daily, CronTrigger(hour=DAILY_RUN_HOUR, minute=DAILY_RUN_MINUTE), id='kpi_daily', name='Daily KPIs',
+                       coalesce=True, max_instances=1, misfire_grace_time=300)
 
     # Run 1-minute KPIs immediately on startup
     log("Running initial checks...")
     job_1_minute()
 
     try:
-        scheduler.start()
+        _scheduler.start()
     except (KeyboardInterrupt, SystemExit):
         log("Scheduler stopped.")
         remove_pid_file()
