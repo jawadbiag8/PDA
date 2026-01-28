@@ -709,7 +709,7 @@ def run_kpis_by_frequency(frequency_filter):
         total_skipped = 0
 
         for asset in assets:
-            log(f"Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'})")
+            log(f"Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'}) | URL: {asset['AssetUrl']}")
             site_is_down = False
 
             for kpi in kpis:
