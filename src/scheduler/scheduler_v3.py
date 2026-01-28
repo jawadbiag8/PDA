@@ -27,7 +27,9 @@ from datetime import datetime
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
+from dotenv import load_dotenv
 
+load_dotenv()
 os.environ['SSL_CERT_FILE'] = certifi.where()
 
 # ============================================================
@@ -35,15 +37,15 @@ os.environ['SSL_CERT_FILE'] = certifi.where()
 # ============================================================
 
 DB_CONFIG = {
-    "host": "localhost",
-    "user": "root",
-    "password": "",
-    "database": "kpi_monitoring"
+    "host": os.getenv("DB_HOST", "localhost"),
+    "user": os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASS", ""),
+    "database": os.getenv("DB_NAME", "kpi_monitoring")
 }
 
 # Daily KPIs run time (24-hour format)
-DAILY_RUN_HOUR = 15  # 11 PM
-DAILY_RUN_MINUTE = 00  # 30 minutes past the hour
+DAILY_RUN_HOUR = 15  # 3 PM
+DAILY_RUN_MINUTE = 00  # Start of hour
 
 # ============================================================
 # HELPER FUNCTIONS
@@ -69,26 +71,19 @@ def get_runner(kpi_type, asset, kpi):
 
 def format_flag_value(result, outcome_type):
     """
-    Format the Flag column value based on outcome type.
-    - Flag outcome: "true" or "false"
-    - Sec outcome: numeric seconds (e.g., "2.5")
-    - MB outcome: numeric megabytes (e.g., "0.75")
-    - % outcome: numeric percentage (e.g., "85.5")
+    Format the Flag value based on outcome type.
+    Used for display purposes only (no Flag column in DB).
     """
     value = result.get('value')
     flag = result.get('flag')
 
     if outcome_type == 'Flag':
-        # For Flag outcomes: true = problem, false = no problem
         return 'true' if flag else 'false'
     elif outcome_type == 'Sec':
-        # For Sec outcomes: store numeric seconds
         return str(value) if value is not None else '0'
     elif outcome_type == 'MB':
-        # For MB outcomes: store numeric megabytes
         return str(value) if value is not None else '0'
     elif outcome_type == '%':
-        # For % outcomes: store numeric percentage (without % sign)
         return str(value) if value is not None else '0'
     else:
         return str(value) if value is not None else ''
@@ -109,9 +104,7 @@ def format_result_value(result, outcome_type):
         return str(value) if value is not None else ''
 
 def determine_target_hit_miss(result_value, target_value, outcome_type, runner_flag):
-    """
-    Determine if result is a hit or miss based on target comparison.
-    """
+    """Determine if result is a hit or miss based on target comparison."""
     if outcome_type == 'Flag':
         return "miss" if runner_flag else "hit"
 
@@ -137,9 +130,9 @@ def check_consecutive_hits(cursor, asset_id, kpi_id, required_frequency):
     try:
         cursor.execute("""
             SELECT Target
-            FROM kpi_results_history
+            FROM KPIsResultHistories
             WHERE AssetId = %s AND KpiId = %s
-            ORDER BY createdAt DESC
+            ORDER BY CreatedAt DESC
             LIMIT %s
         """, (asset_id, kpi_id, required_frequency))
 
@@ -157,7 +150,9 @@ def auto_close_incident(cursor, asset_id, kpi_id):
     """Auto-close incidents when a KPI check passes (only for auto-type incidents)"""
     try:
         cursor.execute("""
-            SELECT Id FROM incidents
+            SELECT Id, AssetId, KpiId, IncidentTitle, Description,
+                   Type, SeverityId, AssignedTo
+            FROM Incidents
             WHERE AssetId = %s AND KpiId = %s AND Status = 'Open' AND Type = 'auto'
         """, (asset_id, kpi_id))
 
@@ -166,25 +161,38 @@ def auto_close_incident(cursor, asset_id, kpi_id):
 
         for incident in incidents:
             cursor.execute("""
-                UPDATE incidents
-                SET Status = 'Closed', updatedAt = NOW()
+                UPDATE Incidents
+                SET Status = 'Resolved', UpdatedAt = NOW(), UpdatedBy = 'system'
                 WHERE Id = %s
             """, (incident['Id'],))
+
+            # Insert into IncidentHistories (audit trail)
+            cursor.execute("""
+                INSERT INTO IncidentHistories (AssetId, IncidentId, KpiId, IncidentTitle, Description,
+                                                Type, SeverityId, Status, AssignedTo, CreatedBy, CreatedAt)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'Resolved', %s, 'system', NOW())
+            """, (incident['AssetId'], incident['Id'], incident['KpiId'], incident['IncidentTitle'],
+                  incident['Description'], incident['Type'], incident['SeverityId'], incident['AssignedTo']))
+
             closed_count += 1
-            print(f"      [AUTO-CLOSE] Incident #{incident['Id']} closed")
+            print(f"      [AUTO-CLOSE] Incident #{incident['Id']} resolved")
 
         return closed_count
     except Exception as e:
         print(f"      [ERROR] Auto-closing incident: {str(e)}")
         return 0
 
-def store_in_results_history(cursor, asset_id, kpi_id, target, result_value, details):
-    """Store KPI result in history table"""
+def store_in_results_history(cursor, asset_id, kpis_result_id, kpi_id, target, result_value, details):
+    """Store KPI result in history table (KPIsResultHistories)"""
     try:
+        if not kpis_result_id:
+            print(f"      [WARN] No kpisResults ID, skipping history insert")
+            return None
+
         cursor.execute("""
-            INSERT INTO kpi_results_history (AssetId, KpiId, Target, Result, Details)
-            VALUES (%s, %s, %s, %s, %s)
-        """, (asset_id, kpi_id, target, result_value, details))
+            INSERT INTO KPIsResultHistories (AssetId, KPIsResultId, KpiId, Details, CreatedAt, Target, Result)
+            VALUES (%s, %s, %s, %s, NOW(), %s, %s)
+        """, (asset_id, kpis_result_id, kpi_id, details, target, result_value))
         return cursor.lastrowid
     except Exception as e:
         print(f"      [ERROR] Storing in history: {str(e)}")
@@ -195,9 +203,9 @@ def check_consecutive_failures(cursor, asset_id, kpi_id, required_frequency):
     try:
         cursor.execute("""
             SELECT Target
-            FROM kpi_results_history
+            FROM KPIsResultHistories
             WHERE AssetId = %s AND KpiId = %s
-            ORDER BY createdAt DESC
+            ORDER BY CreatedAt DESC
             LIMIT %s
         """, (asset_id, kpi_id, required_frequency))
 
@@ -211,13 +219,11 @@ def check_consecutive_failures(cursor, asset_id, kpi_id, required_frequency):
         print(f"      [ERROR] Checking consecutive failures: {str(e)}")
         return False
 
-def create_incident(cursor, asset, kpi_id, kpi_name, severity_id):
+def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
     """Create an incident when a KPI check fails"""
     try:
-        asset_id = asset['Id']
-
         cursor.execute("""
-            SELECT Id FROM incidents
+            SELECT Id FROM Incidents
             WHERE AssetId = %s AND KpiId = %s AND Status = 'Open'
             LIMIT 1
         """, (asset_id, kpi_id))
@@ -231,22 +237,28 @@ def create_incident(cursor, asset, kpi_id, kpi_name, severity_id):
         description = f"{kpi_name} - Auto Created Incident"
 
         cursor.execute("""
-            INSERT INTO incidents (MinistryId, DepartmentId, AssetId, KpiId,
-                                   IncidentTitle, Description, SeverityId, Status, Type)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, 'Open', 'auto')
-        """, (asset.get('MinistryId'), asset.get('DepartmentId'),
-              asset_id, kpi_id, incident_title, description, severity_id))
+            INSERT INTO Incidents (AssetId, KpiId, IncidentTitle, Description,
+                                   Type, SeverityId, Status, AssignedTo, CreatedBy, CreatedAt)
+            VALUES (%s, %s, %s, %s, 'auto', %s, 'Open', 'pda@dams.com', 'system', NOW())
+        """, (asset_id, kpi_id, incident_title, description, severity_id))
 
-        return cursor.lastrowid, True
+        incident_id = cursor.lastrowid
+
+        # Insert into IncidentHistories (audit trail)
+        cursor.execute("""
+            INSERT INTO IncidentHistories (AssetId, IncidentId, KpiId, IncidentTitle, Description,
+                                            Type, SeverityId, Status, AssignedTo, CreatedBy, CreatedAt)
+            VALUES (%s, %s, %s, %s, %s, 'auto', %s, 'Open', 'pda@dams.com', 'system', NOW())
+        """, (asset_id, incident_id, kpi_id, incident_title, description, severity_id))
+
+        return incident_id, True
     except Exception as e:
         print(f"      [ERROR] Creating incident: {str(e)}")
         return None, False
 
 def store_result(cursor, asset_id, kpi_id, result, outcome_type, target_value=None, target_override=None):
-    """Store KPI result in the database using UPSERT logic"""
+    """Store KPI result in the database using UPSERT logic. Returns the kpisResults row ID."""
     try:
-        # Format flag value based on outcome type (true/false, seconds, MB, %)
-        flag_value = format_flag_value(result, outcome_type)
         result_value = format_result_value(result, outcome_type)
         details = result.get('details', '')
 
@@ -262,15 +274,15 @@ def store_result(cursor, asset_id, kpi_id, result, outcome_type, target_value=No
             )
 
         cursor.execute("""
-            INSERT INTO kpis_results (AssetId, KpiId, Flag, Target, Result, Details, createdAt)
-            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+            INSERT INTO kpisResults (AssetId, KpiId, Result, Details, CreatedAt, Target)
+            VALUES (%s, %s, %s, %s, NOW(), %s)
             ON DUPLICATE KEY UPDATE
-                Flag = VALUES(Flag),
-                Target = VALUES(Target),
                 Result = VALUES(Result),
                 Details = VALUES(Details),
-                updatedAt = NOW()
-        """, (asset_id, kpi_id, flag_value, target, result_value, details))
+                UpdatedAt = NOW(),
+                Target = VALUES(Target),
+                Id = LAST_INSERT_ID(Id)
+        """, (asset_id, kpi_id, result_value, details, target))
 
         return cursor.lastrowid
     except Exception as e:
@@ -307,17 +319,17 @@ def run_kpi_for_asset(cursor, asset, kpi, incident_frequency):
     try:
         result = runner.run()
 
-        # Determine target based on CitizenImpactLevel
-        citizen_impact_level = asset.get('CitizenImpactLevel', 'Medium')
-        if citizen_impact_level == 'High':
+        # Determine target based on CitizenImpactLevel (prefix matching for CommonLookup values)
+        citizen_impact_level = (asset.get('CitizenImpactLevel') or '').upper()
+        if citizen_impact_level.startswith('HIGH'):
             target_value = kpi.get('TargetHigh')
-        elif citizen_impact_level == 'Low':
+        elif citizen_impact_level.startswith('LOW'):
             target_value = kpi.get('TargetLow')
         else:
             target_value = kpi.get('TargetMedium')
 
-        # Store result
-        store_result(cursor, asset['Id'], kpi['Id'], result, outcome_type, target_value)
+        # Store result (returns kpisResults row ID for history FK)
+        result_id = store_result(cursor, asset['Id'], kpi['Id'], result, outcome_type, target_value)
 
         # Determine hit/miss
         target = determine_target_hit_miss(
@@ -329,7 +341,7 @@ def run_kpi_for_asset(cursor, asset, kpi, incident_frequency):
 
         # Store in history
         result_value = format_result_value(result, outcome_type)
-        store_in_results_history(cursor, asset['Id'], kpi['Id'], target, result_value, result.get('details', ''))
+        store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], target, result_value, result.get('details', ''))
 
         # Handle incidents using global incidentCreationFrequency
         if target == "miss":
@@ -337,7 +349,7 @@ def run_kpi_for_asset(cursor, asset, kpi, incident_frequency):
 
             if should_create:
                 severity_id = kpi.get('SeverityId')
-                incident_id, is_new = create_incident(cursor, asset, kpi['Id'], kpi_name, severity_id)
+                incident_id, is_new = create_incident(cursor, asset['Id'], kpi['Id'], kpi_name, severity_id)
                 if incident_id and is_new:
                     print(f"      [INCIDENT] #{incident_id} created (after {incident_frequency} consecutive misses)")
                 elif incident_id:
@@ -357,11 +369,11 @@ def run_kpi_for_asset(cursor, asset, kpi, incident_frequency):
 
         # Store error as skipped
         error_result = {'flag': True, 'value': None, 'details': f"Error: {str(e)[:200]}"}
-        store_result(cursor, asset['Id'], kpi['Id'], error_result, outcome_type, target_override="skipped")
+        result_id = store_result(cursor, asset['Id'], kpi['Id'], error_result, outcome_type, target_override="skipped")
 
         # Store in history as skipped
         result_value = format_result_value(error_result, outcome_type)
-        store_in_results_history(cursor, asset['Id'], kpi['Id'], "skipped", result_value, f"Error: {str(e)[:200]}")
+        store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, f"Error: {str(e)[:200]}")
 
         return "skipped"
 
@@ -387,20 +399,21 @@ def run_kpis_by_frequency(frequency_filter):
         cursor.execute("""
             SELECT a.*, m.MinistryName, d.DepartmentName,
                    cl.Name as CitizenImpactLevel
-            FROM assets a
-            LEFT JOIN ministries m ON a.MinistryId = m.Id
-            LEFT JOIN departments d ON a.DepartmentId = d.Id
+            FROM Assets a
+            LEFT JOIN Ministries m ON a.MinistryId = m.Id
+            LEFT JOIN Departments d ON a.DepartmentId = d.Id
             LEFT JOIN CommonLookup cl ON a.CitizenImpactLevelId = cl.Id
-            WHERE a.deleted_at IS NULL
+            WHERE a.DeletedAt IS NULL
         """)
         assets = cursor.fetchall()
 
-        # Get KPIs matching the frequency (include SeverityId for incident creation)
+        # Get KPIs matching the frequency (only automated, include SeverityId)
         cursor.execute("""
             SELECT Id, KpiName, KpiGroup, KpiType, Outcome,
                    TargetHigh, TargetMedium, TargetLow, Frequency, SeverityId
             FROM KpisLov
             WHERE KpiType IS NOT NULL AND Frequency = %s
+                  AND `Manual` = 'Auto' AND DeletedAt IS NULL
         """, (frequency_filter,))
         kpis = cursor.fetchall()
 
@@ -426,9 +439,9 @@ def run_kpis_by_frequency(frequency_filter):
                 if site_is_down:
                     total_skipped += 1
                     skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down'}
-                    store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
+                    result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
                     result_value = format_result_value(skipped_result, kpi['Outcome'])
-                    store_in_results_history(cursor, asset['Id'], kpi['Id'], "skipped", result_value, 'Skipped - site is down')
+                    store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down')
                     print(f"    [SKIP] {kpi['KpiName']} (site is down)")
                     continue
 
