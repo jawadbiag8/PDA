@@ -226,7 +226,7 @@ def auto_close_incident(cursor, asset_id, kpi_id):
             SELECT Id, AssetId, KpiId, IncidentTitle, Description,
                    Type, SeverityId, AssignedTo
             FROM Incidents
-            WHERE AssetId = %s AND KpiId = %s AND Status = 'Open' AND Type = 'auto'
+            WHERE AssetId = %s AND KpiId = %s AND StatusId = 8 AND Type = 'auto'
         """, (asset_id, kpi_id))
 
         incidents = cursor.fetchall()
@@ -235,15 +235,15 @@ def auto_close_incident(cursor, asset_id, kpi_id):
         for incident in incidents:
             cursor.execute("""
                 UPDATE Incidents
-                SET Status = 'Resolved', UpdatedAt = NOW(), UpdatedBy = 'system'
+                SET StatusId = 12, UpdatedAt = NOW(), UpdatedBy = 'system'
                 WHERE Id = %s
             """, (incident['Id'],))
 
             # Insert into IncidentHistories (audit trail)
             cursor.execute("""
                 INSERT INTO IncidentHistories (AssetId, IncidentId, KpiId, IncidentTitle, Description,
-                                                Type, SeverityId, Status, AssignedTo, CreatedBy, CreatedAt)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 'Resolved', %s, 'system', NOW())
+                                                Type, SeverityId, StatusId, AssignedTo, CreatedBy, CreatedAt)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 12, %s, 'system', NOW())
             """, (incident['AssetId'], incident['Id'], incident['KpiId'], incident['IncidentTitle'],
                   incident['Description'], incident['Type'], incident['SeverityId'], incident['AssignedTo']))
 
@@ -297,7 +297,7 @@ def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
     try:
         cursor.execute("""
             SELECT Id FROM Incidents
-            WHERE AssetId = %s AND KpiId = %s AND Status = 'Open'
+            WHERE AssetId = %s AND KpiId = %s AND StatusId = 8
             LIMIT 1
         """, (asset_id, kpi_id))
 
@@ -311,8 +311,8 @@ def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
 
         cursor.execute("""
             INSERT INTO Incidents (AssetId, KpiId, IncidentTitle, Description,
-                                   Type, SeverityId, Status, AssignedTo, CreatedBy, CreatedAt)
-            VALUES (%s, %s, %s, %s, 'auto', %s, 'Open', 'pda@dams.com', 'system', NOW())
+                                   Type, SeverityId, StatusId, AssignedTo, CreatedBy, CreatedAt)
+            VALUES (%s, %s, %s, %s, 'auto', %s, 8, 'pda@dams.com', 'system', NOW())
         """, (asset_id, kpi_id, incident_title, description, severity_id))
 
         incident_id = cursor.lastrowid
@@ -320,8 +320,8 @@ def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
         # Insert into IncidentHistories (audit trail)
         cursor.execute("""
             INSERT INTO IncidentHistories (AssetId, IncidentId, KpiId, IncidentTitle, Description,
-                                            Type, SeverityId, Status, AssignedTo, CreatedBy, CreatedAt)
-            VALUES (%s, %s, %s, %s, %s, 'auto', %s, 'Open', 'pda@dams.com', 'system', NOW())
+                                            Type, SeverityId, StatusId, AssignedTo, CreatedBy, CreatedAt)
+            VALUES (%s, %s, %s, %s, %s, 'auto', %s, 8, 'pda@dams.com', 'system', NOW())
         """, (asset_id, incident_id, kpi_id, incident_title, description, severity_id))
 
         return incident_id, True
@@ -492,10 +492,10 @@ def recalculate_asset_metrics(cursor, asset_id, citizen_impact_level):
 
         # Count incidents by severity (all time for this asset)
         cursor.execute("""
-            SELECT SeverityId, Status, COUNT(*) as cnt
+            SELECT SeverityId, StatusId, COUNT(*) as cnt
             FROM Incidents
             WHERE AssetId = %s AND DeletedAt IS NULL
-            GROUP BY SeverityId, Status
+            GROUP BY SeverityId, StatusId
         """, (asset_id,))
 
         incident_counts = {}  # {'P1': {'open': 0, 'total': 0}, ...}
@@ -504,7 +504,7 @@ def recalculate_asset_metrics(cursor, asset_id, citizen_impact_level):
             if sev_name not in incident_counts:
                 incident_counts[sev_name] = {'open': 0, 'total': 0}
             incident_counts[sev_name]['total'] += row['cnt']
-            if row['Status'] == 'Open':
+            if row['StatusId'] == 8:
                 incident_counts[sev_name]['open'] += row['cnt']
 
         # Map severity names to DREI categories
