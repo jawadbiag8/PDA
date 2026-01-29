@@ -797,7 +797,7 @@ def run_kpis_by_frequency(frequency_filter):
             # Pre-check: is the site reachable?
             site_is_down = False
             try:
-                resp = requests.head(asset['AssetUrl'], timeout=5, verify=False, allow_redirects=True)
+                resp = requests.head(asset['AssetUrl'], timeout=10, verify=False, allow_redirects=True)
                 if resp.status_code >= 500:
                     site_is_down = True
                     log(f"  [DOWN] Site returned HTTP {resp.status_code}")
@@ -947,7 +947,7 @@ def process_single_asset_browser_kpis(asset, browser_kpis, incident_frequency):
         # Quick pre-check: is the site reachable? Avoids launching browser for down sites
         site_reachable = False
         try:
-            resp = requests.head(asset['AssetUrl'], timeout=5, verify=False, allow_redirects=True)
+            resp = requests.head(asset['AssetUrl'], timeout=10, verify=False, allow_redirects=True)
             site_reachable = resp.status_code < 500
         except:
             site_reachable = False
@@ -1093,7 +1093,7 @@ def run_daily_kpis_parallel():
         log("Pre-checking site availability...")
         for asset in assets:
             try:
-                resp = requests.head(asset['AssetUrl'], timeout=5, verify=False, allow_redirects=True)
+                resp = requests.head(asset['AssetUrl'], timeout=10, verify=False, allow_redirects=True)
                 if resp.status_code >= 500:
                     down_asset_ids.add(asset['Id'])
                     log(f"  [DOWN] {asset['AssetName']} - HTTP {resp.status_code}")
