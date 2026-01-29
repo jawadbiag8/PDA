@@ -809,12 +809,21 @@ def run_kpis_by_frequency(frequency_filter):
                 all_freq_kpis = list(non_browser_kpis) + list(browser_kpis)
                 for kpi in all_freq_kpis:
                     total_checks += 1
-                    total_skipped += 1
-                    skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down (pre-check failed)'}
-                    result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
-                    result_value = format_result_value(skipped_result, kpi['Outcome'])
-                    store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down (pre-check failed)')
-                    log(f"  [SKIP] {kpi['KpiName']} (site is down)")
+                    is_down_kpi = 'completely down' in kpi['KpiName'].lower()
+                    if is_down_kpi:
+                        total_misses += 1
+                        down_result = {'flag': False, 'value': None, 'details': 'Site is down (pre-check failed)'}
+                        result_id = store_result(cursor, asset['Id'], kpi['Id'], down_result, kpi['Outcome'], target_override="miss")
+                        result_value = format_result_value(down_result, kpi['Outcome'])
+                        store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "miss", result_value, 'Site is down (pre-check failed)')
+                        log(f"  [MISS] {kpi['KpiName']} (site is down)")
+                    else:
+                        total_skipped += 1
+                        skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down (pre-check failed)'}
+                        result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
+                        result_value = format_result_value(skipped_result, kpi['Outcome'])
+                        store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down (pre-check failed)')
+                        log(f"  [SKIP] {kpi['KpiName']} (site is down)")
                 conn.commit()
                 recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
                 conn.commit()
@@ -947,12 +956,21 @@ def process_single_asset_browser_kpis(asset, browser_kpis, incident_frequency):
             log(f"  [DOWN] Site unreachable (HTTP HEAD failed) - skipping all browser KPIs")
             for kpi in browser_kpis:
                 counts['checks'] += 1
-                counts['skipped'] += 1
-                skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down (pre-check failed)'}
-                result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
-                result_value = format_result_value(skipped_result, kpi['Outcome'])
-                store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down (pre-check failed)')
-                log(f"  [SKIP] {kpi['KpiName']} (site is down)")
+                is_down_kpi = 'completely down' in kpi['KpiName'].lower()
+                if is_down_kpi:
+                    counts['misses'] += 1
+                    down_result = {'flag': False, 'value': None, 'details': 'Site is down (pre-check failed)'}
+                    result_id = store_result(cursor, asset['Id'], kpi['Id'], down_result, kpi['Outcome'], target_override="miss")
+                    result_value = format_result_value(down_result, kpi['Outcome'])
+                    store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "miss", result_value, 'Site is down (pre-check failed)')
+                    log(f"  [MISS] {kpi['KpiName']} (site is down)")
+                else:
+                    counts['skipped'] += 1
+                    skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down (pre-check failed)'}
+                    result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
+                    result_value = format_result_value(skipped_result, kpi['Outcome'])
+                    store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down (pre-check failed)')
+                    log(f"  [SKIP] {kpi['KpiName']} (site is down)")
             conn.commit()
             recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
             conn.commit()
@@ -1089,12 +1107,21 @@ def run_daily_kpis_parallel():
                 if asset['Id'] in down_asset_ids:
                     for kpi in all_kpis:
                         total_checks += 1
-                        total_skipped += 1
-                        skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down (pre-check failed)'}
-                        result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
-                        result_value = format_result_value(skipped_result, kpi['Outcome'])
-                        store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down (pre-check failed)')
-                        log(f"  [SKIP] {asset['AssetName']} > {kpi['KpiName']} (site is down)")
+                        is_down_kpi = 'completely down' in kpi['KpiName'].lower()
+                        if is_down_kpi:
+                            total_misses += 1
+                            down_result = {'flag': False, 'value': None, 'details': 'Site is down (pre-check failed)'}
+                            result_id = store_result(cursor, asset['Id'], kpi['Id'], down_result, kpi['Outcome'], target_override="miss")
+                            result_value = format_result_value(down_result, kpi['Outcome'])
+                            store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "miss", result_value, 'Site is down (pre-check failed)')
+                            log(f"  [MISS] {asset['AssetName']} > {kpi['KpiName']} (site is down)")
+                        else:
+                            total_skipped += 1
+                            skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down (pre-check failed)'}
+                            result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
+                            result_value = format_result_value(skipped_result, kpi['Outcome'])
+                            store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down (pre-check failed)')
+                            log(f"  [SKIP] {asset['AssetName']} > {kpi['KpiName']} (site is down)")
                     conn.commit()
                     recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
                     conn.commit()
