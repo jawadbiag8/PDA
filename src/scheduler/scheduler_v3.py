@@ -96,7 +96,14 @@ def setup_logging():
 logger = setup_logging()
 
 def log(message, level="info"):
-    """Log message to both file and console"""
+    """Log message to both file and console.
+    If thread-local buffering is enabled, messages are stored in the buffer
+    instead of being printed immediately (for ordered output in parallel mode)."""
+    # If thread-local buffering is enabled, store instead of printing
+    if hasattr(_thread_local, 'log_buffer') and _thread_local.log_buffer is not None:
+        _thread_local.log_buffer.append((message, level))
+        return
+
     # Check if date changed, rotate log file if needed
     current_date = datetime.now().strftime("%Y-%m-%d")
     expected_log_file = os.path.join(LOG_PATH, f"{current_date}.log")
@@ -119,6 +126,78 @@ def log(message, level="info"):
         logger.warning(message)
     else:
         logger.info(message)
+
+
+def flush_log_buffer(buffer):
+    """Flush buffered log messages in order"""
+    for message, level in buffer:
+        if level == "error":
+            logger.error(message)
+        elif level == "warning":
+            logger.warning(message)
+        else:
+            logger.info(message)
+
+def run_parallel_and_log_in_order(assets, worker_fn, worker_args):
+    """Run a worker function across all assets in parallel using ThreadPoolExecutor,
+    but flush logs progressively in asset order as workers complete.
+
+    Args:
+        assets: list of asset dicts (defines the output order)
+        worker_fn: function(asset, *worker_args) -> counts dict with 'log_buffer'
+        worker_args: tuple of additional args to pass to worker_fn
+
+    Returns:
+        dict with total checks, hits, misses, skipped
+    """
+    totals = {'checks': 0, 'hits': 0, 'misses': 0, 'skipped': 0}
+    results_by_asset = {}
+    next_index = 0  # next asset index to flush
+    asset_id_to_index = {asset['Id']: idx for idx, asset in enumerate(assets)}
+
+    with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
+        futures = {
+            executor.submit(worker_fn, asset, *worker_args): asset
+            for asset in assets
+        }
+
+        for future in as_completed(futures):
+            asset = futures[future]
+            try:
+                counts = future.result()
+                results_by_asset[asset['Id']] = counts
+            except Exception as e:
+                results_by_asset[asset['Id']] = {
+                    'checks': 0, 'hits': 0, 'misses': 0, 'skipped': 0,
+                    'log_buffer': [(f"[ERROR] Failed processing {asset['AssetName']}: {str(e)}", "error")]
+                }
+
+            # Flush all consecutive completed assets starting from next_index
+            while next_index < len(assets):
+                asset_at_index = assets[next_index]
+                if asset_at_index['Id'] not in results_by_asset:
+                    break  # this asset hasn't finished yet
+                counts = results_by_asset[asset_at_index['Id']]
+                flush_log_buffer(counts.get('log_buffer', []))
+                totals['checks'] += counts.get('checks', 0)
+                totals['hits'] += counts.get('hits', 0)
+                totals['misses'] += counts.get('misses', 0)
+                totals['skipped'] += counts.get('skipped', 0)
+                next_index += 1
+
+    # Flush any remaining (shouldn't happen, but safety net)
+    while next_index < len(assets):
+        asset_at_index = assets[next_index]
+        counts = results_by_asset.get(asset_at_index['Id'], {})
+        flush_log_buffer(counts.get('log_buffer', []))
+        totals['checks'] += counts.get('checks', 0)
+        totals['hits'] += counts.get('hits', 0)
+        totals['misses'] += counts.get('misses', 0)
+        totals['skipped'] += counts.get('skipped', 0)
+        next_index += 1
+
+    return totals
+
 
 # ============================================================
 # HELPER FUNCTIONS
@@ -737,6 +816,427 @@ def run_browser_kpi_with_page(cursor, asset, kpi, incident_frequency, page, load
         return "skipped"
 
 
+def process_single_asset_1min(asset, kpis, incident_freq):
+    """Process all 1-min KPIs for a single asset in a worker thread.
+    No pre-check needed - KPI 1 (completely down) IS the down check.
+    If KPI 1 returns miss, remaining KPIs are skipped."""
+    counts = {'checks': 0, 'hits': 0, 'misses': 0, 'skipped': 0}
+    _thread_local.log_buffer = []
+    conn = get_thread_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        log(f"Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'}) | URL: {asset['AssetUrl']}")
+        site_is_down = False
+
+        for kpi in kpis:
+            kpi_name_lower = kpi['KpiName'].lower()
+
+            if site_is_down:
+                counts['checks'] += 1
+                counts['skipped'] += 1
+                skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down'}
+                result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
+                result_value = format_result_value(skipped_result, kpi['Outcome'])
+                store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down')
+                log(f"  [SKIP] {kpi['KpiName']} (site is down)")
+                continue
+
+            counts['checks'] += 1
+            result = run_kpi_for_asset(cursor, asset, kpi, incident_freq)
+
+            if result == "hit":
+                counts['hits'] += 1
+                symbol = "[HIT]"
+            elif result == "miss":
+                counts['misses'] += 1
+                symbol = "[MISS]"
+            elif result == "skipped":
+                counts['skipped'] += 1
+                symbol = "[SKIP]"
+            else:
+                symbol = "[ERR]"
+
+            log(f"  {symbol} {kpi['KpiName']}")
+
+            if 'completely down' in kpi_name_lower and result == "miss":
+                site_is_down = True
+                log(f"  >> Site is DOWN - skipping remaining KPIs for this asset")
+
+        conn.commit()
+        recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
+        conn.commit()
+
+    except Exception as e:
+        log(f"[ERROR] Asset {asset['AssetName']}: {str(e)}", "error")
+        try:
+            conn.commit()
+        except:
+            pass
+    finally:
+        cursor.close()
+
+    counts['log_buffer'] = _thread_local.log_buffer
+    _thread_local.log_buffer = None
+    return counts
+
+
+def run_1min_kpis():
+    """Run 1-min frequency KPIs in parallel across all assets.
+    No pre-check needed - KPI 1 (completely down) determines if site is down."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    log("=" * 80)
+    log("Running KPIs with frequency: 1 min")
+    log("=" * 80)
+
+    try:
+        cursor.execute("""
+            SELECT Name FROM CommonLookup WHERE Type = 'IncidentCreationFrequency' LIMIT 1
+        """)
+        freq_row = cursor.fetchone()
+        incident_frequency = int(freq_row['Name']) if freq_row else 3
+
+        cursor.execute("""
+            SELECT a.*, m.MinistryName, d.DepartmentName,
+                   cl.Name as CitizenImpactLevel
+            FROM Assets a
+            LEFT JOIN Ministries m ON a.MinistryId = m.Id
+            LEFT JOIN Departments d ON a.DepartmentId = d.Id
+            LEFT JOIN CommonLookup cl ON a.CitizenImpactLevelId = cl.Id
+            WHERE a.DeletedAt IS NULL
+        """)
+        assets = cursor.fetchall()
+
+        cursor.execute("""
+            SELECT Id, KpiName, KpiGroup, KpiType, Outcome,
+                   TargetHigh, TargetMedium, TargetLow, Frequency, SeverityId
+            FROM KpisLov
+            WHERE KpiType IS NOT NULL AND Frequency = '1 min'
+                  AND `Manual` = 'Auto' AND DeletedAt IS NULL
+        """)
+        kpis = cursor.fetchall()
+
+        if not kpis:
+            log("No KPIs found with frequency: 1 min", "warning")
+            return
+
+        log(f"Assets: {len(assets)} | KPIs: {len(kpis)} | Workers: {PARALLEL_WORKERS}")
+
+        totals = run_parallel_and_log_in_order(assets, process_single_asset_1min, (kpis, incident_frequency))
+
+        log(f"Summary: {totals['checks']} checks | {totals['hits']} hits | {totals['misses']} misses | {totals['skipped']} skipped")
+
+    except Exception as e:
+        log(f"[ERROR] {str(e)}", "error")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def process_single_asset_5min(asset, kpis, incident_freq):
+    """Process all 5-min KPIs for a single asset in a worker thread.
+    Uses pre-check since 5-min KPIs don't include KPI 1 (completely down)."""
+    counts = {'checks': 0, 'hits': 0, 'misses': 0, 'skipped': 0}
+    _thread_local.log_buffer = []
+    conn = get_thread_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        log(f"Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'}) | URL: {asset['AssetUrl']}")
+
+        # Pre-check: is the site reachable?
+        site_is_down = False
+        try:
+            resp = requests.head(asset['AssetUrl'], timeout=10, verify=False, allow_redirects=True)
+            if resp.status_code >= 500:
+                site_is_down = True
+                log(f"  [DOWN] Site returned HTTP {resp.status_code}")
+        except:
+            site_is_down = True
+            log(f"  [DOWN] Site unreachable")
+
+        if site_is_down:
+            for kpi in kpis:
+                counts['checks'] += 1
+                counts['skipped'] += 1
+                skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down (pre-check failed)'}
+                result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
+                result_value = format_result_value(skipped_result, kpi['Outcome'])
+                store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down (pre-check failed)')
+                log(f"  [SKIP] {kpi['KpiName']} (site is down)")
+            conn.commit()
+            recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
+            conn.commit()
+            counts['log_buffer'] = _thread_local.log_buffer
+            _thread_local.log_buffer = None
+            cursor.close()
+            return counts
+
+        for kpi in kpis:
+            counts['checks'] += 1
+            result = run_kpi_for_asset(cursor, asset, kpi, incident_freq)
+
+            if result == "hit":
+                counts['hits'] += 1
+                symbol = "[HIT]"
+            elif result == "miss":
+                counts['misses'] += 1
+                symbol = "[MISS]"
+            elif result == "skipped":
+                counts['skipped'] += 1
+                symbol = "[SKIP]"
+            else:
+                symbol = "[ERR]"
+
+            log(f"  {symbol} {kpi['KpiName']}")
+
+        conn.commit()
+        recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
+        conn.commit()
+
+    except Exception as e:
+        log(f"[ERROR] Asset {asset['AssetName']}: {str(e)}", "error")
+        try:
+            conn.commit()
+        except:
+            pass
+    finally:
+        cursor.close()
+
+    counts['log_buffer'] = _thread_local.log_buffer
+    _thread_local.log_buffer = None
+    return counts
+
+
+def run_5min_kpis():
+    """Run 5-min frequency KPIs in parallel across all assets.
+    Uses pre-check to skip down sites."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    log("=" * 80)
+    log("Running KPIs with frequency: 5 min")
+    log("=" * 80)
+
+    try:
+        cursor.execute("""
+            SELECT Name FROM CommonLookup WHERE Type = 'IncidentCreationFrequency' LIMIT 1
+        """)
+        freq_row = cursor.fetchone()
+        incident_frequency = int(freq_row['Name']) if freq_row else 3
+
+        cursor.execute("""
+            SELECT a.*, m.MinistryName, d.DepartmentName,
+                   cl.Name as CitizenImpactLevel
+            FROM Assets a
+            LEFT JOIN Ministries m ON a.MinistryId = m.Id
+            LEFT JOIN Departments d ON a.DepartmentId = d.Id
+            LEFT JOIN CommonLookup cl ON a.CitizenImpactLevelId = cl.Id
+            WHERE a.DeletedAt IS NULL
+        """)
+        assets = cursor.fetchall()
+
+        cursor.execute("""
+            SELECT Id, KpiName, KpiGroup, KpiType, Outcome,
+                   TargetHigh, TargetMedium, TargetLow, Frequency, SeverityId
+            FROM KpisLov
+            WHERE KpiType IS NOT NULL AND Frequency = '5 min'
+                  AND `Manual` = 'Auto' AND DeletedAt IS NULL
+        """)
+        kpis = cursor.fetchall()
+
+        if not kpis:
+            log("No KPIs found with frequency: 5 min", "warning")
+            return
+
+        log(f"Assets: {len(assets)} | KPIs: {len(kpis)} | Workers: {PARALLEL_WORKERS}")
+
+        totals = run_parallel_and_log_in_order(assets, process_single_asset_5min, (kpis, incident_frequency))
+
+        log(f"Summary: {totals['checks']} checks | {totals['hits']} hits | {totals['misses']} misses | {totals['skipped']} skipped")
+
+    except Exception as e:
+        log(f"[ERROR] {str(e)}", "error")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def process_single_asset_15min(asset, non_browser_kpis, browser_kpis, incident_freq):
+    """Process all 15-min KPIs for a single asset in a worker thread.
+    Uses pre-check to skip down sites. Runs non-browser KPIs first,
+    then browser KPIs with SharedBrowserContext."""
+    counts = {'checks': 0, 'hits': 0, 'misses': 0, 'skipped': 0}
+    _thread_local.log_buffer = []
+    conn = get_thread_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        log(f"Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'}) | URL: {asset['AssetUrl']}")
+
+        # Pre-check: is the site reachable?
+        site_is_down = False
+        try:
+            resp = requests.head(asset['AssetUrl'], timeout=10, verify=False, allow_redirects=True)
+            if resp.status_code >= 500:
+                site_is_down = True
+                log(f"  [DOWN] Site returned HTTP {resp.status_code}")
+        except:
+            site_is_down = True
+            log(f"  [DOWN] Site unreachable")
+
+        if site_is_down:
+            all_kpis = list(non_browser_kpis) + list(browser_kpis)
+            for kpi in all_kpis:
+                counts['checks'] += 1
+                counts['skipped'] += 1
+                skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down (pre-check failed)'}
+                result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
+                result_value = format_result_value(skipped_result, kpi['Outcome'])
+                store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down (pre-check failed)')
+                log(f"  [SKIP] {kpi['KpiName']} (site is down)")
+            conn.commit()
+            recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
+            conn.commit()
+            counts['log_buffer'] = _thread_local.log_buffer
+            _thread_local.log_buffer = None
+            cursor.close()
+            return counts
+
+        # Run non-browser KPIs first
+        for kpi in non_browser_kpis:
+            counts['checks'] += 1
+            result = run_kpi_for_asset(cursor, asset, kpi, incident_freq)
+
+            if result == "hit":
+                counts['hits'] += 1
+                symbol = "[HIT]"
+            elif result == "miss":
+                counts['misses'] += 1
+                symbol = "[MISS]"
+            elif result == "skipped":
+                counts['skipped'] += 1
+                symbol = "[SKIP]"
+            else:
+                symbol = "[ERR]"
+
+            log(f"  {symbol} {kpi['KpiName']}")
+
+        # Run browser KPIs with shared browser instance
+        if browser_kpis:
+            try:
+                with SharedBrowserContext() as ctx:
+                    page, load_time, nav_success = ctx.navigate_to(asset['AssetUrl'])
+
+                    if not nav_success:
+                        log(f"  [WARN] Page load was slow/partial, running checks anyway")
+
+                    for kpi in browser_kpis:
+                        counts['checks'] += 1
+                        result = run_browser_kpi_with_page(cursor, asset, kpi, incident_freq, page, load_time)
+
+                        if result == "hit":
+                            counts['hits'] += 1
+                            symbol = "[HIT]"
+                        elif result == "miss":
+                            counts['misses'] += 1
+                            symbol = "[MISS]"
+                        elif result == "skipped":
+                            counts['skipped'] += 1
+                            symbol = "[SKIP]"
+                        else:
+                            symbol = "[ERR]"
+
+                        log(f"  {symbol} {kpi['KpiName']}")
+
+            except Exception as e:
+                log(f"[ERROR] Browser context failed: {str(e)}", "error")
+                for kpi in browser_kpis:
+                    counts['checks'] += 1
+                    counts['skipped'] += 1
+                    skipped_result = {'flag': True, 'value': None, 'details': f'Browser error: {str(e)[:100]}'}
+                    result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
+                    result_value = format_result_value(skipped_result, kpi['Outcome'])
+                    store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, f'Browser error: {str(e)[:100]}')
+                    log(f"  [SKIP] {kpi['KpiName']} (browser error)")
+
+        conn.commit()
+        recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
+        conn.commit()
+
+    except Exception as e:
+        log(f"[ERROR] Asset {asset['AssetName']}: {str(e)}", "error")
+        try:
+            conn.commit()
+        except:
+            pass
+    finally:
+        cursor.close()
+
+    counts['log_buffer'] = _thread_local.log_buffer
+    _thread_local.log_buffer = None
+    return counts
+
+
+def run_15min_kpis():
+    """Run 15-min frequency KPIs in parallel across all assets.
+    Uses pre-check to skip down sites. Browser KPIs use SharedBrowserContext per worker."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    log("=" * 80)
+    log("Running KPIs with frequency: 15 min")
+    log("=" * 80)
+
+    try:
+        cursor.execute("""
+            SELECT Name FROM CommonLookup WHERE Type = 'IncidentCreationFrequency' LIMIT 1
+        """)
+        freq_row = cursor.fetchone()
+        incident_frequency = int(freq_row['Name']) if freq_row else 3
+
+        cursor.execute("""
+            SELECT a.*, m.MinistryName, d.DepartmentName,
+                   cl.Name as CitizenImpactLevel
+            FROM Assets a
+            LEFT JOIN Ministries m ON a.MinistryId = m.Id
+            LEFT JOIN Departments d ON a.DepartmentId = d.Id
+            LEFT JOIN CommonLookup cl ON a.CitizenImpactLevelId = cl.Id
+            WHERE a.DeletedAt IS NULL
+        """)
+        assets = cursor.fetchall()
+
+        cursor.execute("""
+            SELECT Id, KpiName, KpiGroup, KpiType, Outcome,
+                   TargetHigh, TargetMedium, TargetLow, Frequency, SeverityId
+            FROM KpisLov
+            WHERE KpiType IS NOT NULL AND Frequency = '15 min'
+                  AND `Manual` = 'Auto' AND DeletedAt IS NULL
+        """)
+        kpis = cursor.fetchall()
+
+        if not kpis:
+            log("No KPIs found with frequency: 15 min", "warning")
+            return
+
+        browser_kpis = [k for k in kpis if k['KpiType'] == 'browser']
+        non_browser_kpis = [k for k in kpis if k['KpiType'] != 'browser']
+
+        log(f"Assets: {len(assets)} | KPIs: {len(kpis)} (browser: {len(browser_kpis)}, other: {len(non_browser_kpis)}) | Workers: {PARALLEL_WORKERS}")
+
+        totals = run_parallel_and_log_in_order(assets, process_single_asset_15min, (non_browser_kpis, browser_kpis, incident_frequency))
+
+        log(f"Summary: {totals['checks']} checks | {totals['hits']} hits | {totals['misses']} misses | {totals['skipped']} skipped")
+
+    except Exception as e:
+        log(f"[ERROR] {str(e)}", "error")
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def run_kpis_by_frequency(frequency_filter):
     """Run all KPIs that match the given frequency"""
     conn = get_db_connection()
@@ -929,110 +1429,125 @@ def get_thread_db_connection():
         _thread_local.connection = mysql.connector.connect(**DB_CONFIG)
     return _thread_local.connection
 
-def process_single_asset_browser_kpis(asset, browser_kpis, incident_frequency):
-    """
-    Process all browser KPIs for a single asset.
-    Designed to run in a thread pool for parallel processing.
-
-    Returns: dict with counts {checks, hits, misses, skipped}
-    """
+def process_single_asset_daily(asset, non_browser_kpis, browser_kpis, incident_freq):
+    """Process all daily KPIs for a single asset in a worker thread.
+    Uses pre-check to skip down sites. Runs non-browser KPIs first,
+    then browser KPIs with SharedBrowserContext."""
     counts = {'checks': 0, 'hits': 0, 'misses': 0, 'skipped': 0}
-
+    _thread_local.log_buffer = []
     conn = get_thread_db_connection()
     cursor = conn.cursor(dictionary=True)
 
     try:
-        log(f"[PARALLEL] Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'}) | URL: {asset['AssetUrl']}")
+        log(f"Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'}) | URL: {asset['AssetUrl']}")
 
-        # Quick pre-check: is the site reachable? Avoids launching browser for down sites
-        site_reachable = False
+        # Pre-check: is the site reachable?
+        site_is_down = False
         try:
             resp = requests.head(asset['AssetUrl'], timeout=10, verify=False, allow_redirects=True)
-            site_reachable = resp.status_code < 500
+            if resp.status_code >= 500:
+                site_is_down = True
+                log(f"  [DOWN] Site returned HTTP {resp.status_code}")
         except:
-            site_reachable = False
+            site_is_down = True
+            log(f"  [DOWN] Site unreachable")
 
-        if not site_reachable:
-            log(f"  [DOWN] Site unreachable (HTTP HEAD failed) - skipping all browser KPIs")
-            for kpi in browser_kpis:
+        if site_is_down:
+            all_kpis = list(non_browser_kpis) + list(browser_kpis)
+            for kpi in all_kpis:
                 counts['checks'] += 1
-                is_down_kpi = 'completely down' in kpi['KpiName'].lower()
-                if is_down_kpi:
-                    counts['misses'] += 1
-                    down_result = {'flag': False, 'value': None, 'details': 'Site is down (pre-check failed)'}
-                    result_id = store_result(cursor, asset['Id'], kpi['Id'], down_result, kpi['Outcome'], target_override="miss")
-                    result_value = format_result_value(down_result, kpi['Outcome'])
-                    store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "miss", result_value, 'Site is down (pre-check failed)')
-                    log(f"  [MISS] {kpi['KpiName']} (site is down)")
-                else:
-                    counts['skipped'] += 1
-                    skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down (pre-check failed)'}
-                    result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
-                    result_value = format_result_value(skipped_result, kpi['Outcome'])
-                    store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down (pre-check failed)')
-                    log(f"  [SKIP] {kpi['KpiName']} (site is down)")
+                counts['skipped'] += 1
+                skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down (pre-check failed)'}
+                result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
+                result_value = format_result_value(skipped_result, kpi['Outcome'])
+                store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down (pre-check failed)')
+                log(f"  [SKIP] {kpi['KpiName']} (site is down)")
             conn.commit()
             recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
             conn.commit()
+            counts['log_buffer'] = _thread_local.log_buffer
+            _thread_local.log_buffer = None
             cursor.close()
             return counts
 
-        with SharedBrowserContext() as ctx:
-            page, load_time, nav_success = ctx.navigate_to(asset['AssetUrl'])
+        # Run non-browser KPIs first
+        for kpi in non_browser_kpis:
+            counts['checks'] += 1
+            result = run_kpi_for_asset(cursor, asset, kpi, incident_freq)
 
-            if not nav_success:
-                log(f"  [WARN] Page load was slow/partial, running checks anyway")
+            if result == "hit":
+                counts['hits'] += 1
+                symbol = "[HIT]"
+            elif result == "miss":
+                counts['misses'] += 1
+                symbol = "[MISS]"
+            elif result == "skipped":
+                counts['skipped'] += 1
+                symbol = "[SKIP]"
+            else:
+                symbol = "[ERR]"
 
-            for kpi in browser_kpis:
-                counts['checks'] += 1
-                result = run_browser_kpi_with_page(cursor, asset, kpi, incident_frequency, page, load_time)
+            log(f"  {symbol} {kpi['KpiName']}")
 
-                if result == "hit":
-                    counts['hits'] += 1
-                    symbol = "[HIT]"
-                elif result == "miss":
-                    counts['misses'] += 1
-                    symbol = "[MISS]"
-                elif result == "skipped":
+        # Run browser KPIs with shared browser instance
+        if browser_kpis:
+            try:
+                with SharedBrowserContext() as ctx:
+                    page, load_time, nav_success = ctx.navigate_to(asset['AssetUrl'])
+
+                    if not nav_success:
+                        log(f"  [WARN] Page load was slow/partial, running checks anyway")
+
+                    for kpi in browser_kpis:
+                        counts['checks'] += 1
+                        result = run_browser_kpi_with_page(cursor, asset, kpi, incident_freq, page, load_time)
+
+                        if result == "hit":
+                            counts['hits'] += 1
+                            symbol = "[HIT]"
+                        elif result == "miss":
+                            counts['misses'] += 1
+                            symbol = "[MISS]"
+                        elif result == "skipped":
+                            counts['skipped'] += 1
+                            symbol = "[SKIP]"
+                        else:
+                            symbol = "[ERR]"
+
+                        log(f"  {symbol} {kpi['KpiName']}")
+
+            except Exception as e:
+                log(f"[ERROR] Browser context failed: {str(e)}", "error")
+                for kpi in browser_kpis:
+                    counts['checks'] += 1
                     counts['skipped'] += 1
-                    symbol = "[SKIP]"
-                else:
-                    symbol = "[ERR]"
-
-                log(f"  {symbol} {kpi['KpiName']}")
+                    skipped_result = {'flag': True, 'value': None, 'details': f'Browser error: {str(e)[:100]}'}
+                    result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
+                    result_value = format_result_value(skipped_result, kpi['Outcome'])
+                    store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, f'Browser error: {str(e)[:100]}')
+                    log(f"  [SKIP] {kpi['KpiName']} (browser error)")
 
         conn.commit()
-
-        # Recalculate metrics for this asset
         recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
         conn.commit()
 
     except Exception as e:
         log(f"[ERROR] Asset {asset['AssetName']}: {str(e)}", "error")
-        # Mark all browser KPIs as skipped on error
-        for kpi in browser_kpis:
-            counts['skipped'] += 1
-            try:
-                skipped_result = {'flag': True, 'value': None, 'details': f'Browser error: {str(e)[:100]}'}
-                result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
-                result_value = format_result_value(skipped_result, kpi['Outcome'])
-                store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, f'Browser error: {str(e)[:100]}')
-            except:
-                pass
         try:
             conn.commit()
         except:
             pass
-
     finally:
         cursor.close()
-        # Don't close connection - reuse in thread pool
 
+    counts['log_buffer'] = _thread_local.log_buffer
+    _thread_local.log_buffer = None
     return counts
 
 
 def run_daily_kpis_parallel():
-    """Run daily KPIs with parallel processing for browser-based checks"""
+    """Run daily KPIs in parallel across all assets.
+    Uses pre-check to skip down sites. Browser KPIs use SharedBrowserContext per worker."""
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
@@ -1041,14 +1556,12 @@ def run_daily_kpis_parallel():
     log("=" * 80)
 
     try:
-        # Get global IncidentCreationFrequency
         cursor.execute("""
             SELECT Name FROM CommonLookup WHERE Type = 'IncidentCreationFrequency' LIMIT 1
         """)
         freq_row = cursor.fetchone()
         incident_frequency = int(freq_row['Name']) if freq_row else 3
 
-        # Get all active assets
         cursor.execute("""
             SELECT a.*, m.MinistryName, d.DepartmentName,
                    cl.Name as CitizenImpactLevel
@@ -1060,7 +1573,6 @@ def run_daily_kpis_parallel():
         """)
         assets = cursor.fetchall()
 
-        # Get daily KPIs (browser-based)
         cursor.execute("""
             SELECT Id, KpiName, KpiGroup, KpiType, Outcome,
                    TargetHigh, TargetMedium, TargetLow, Frequency, SeverityId
@@ -1074,102 +1586,14 @@ def run_daily_kpis_parallel():
             log("No daily KPIs found", "warning")
             return
 
-        # Separate browser and non-browser KPIs
         browser_kpis = [k for k in kpis if k['KpiType'] == 'browser']
         non_browser_kpis = [k for k in kpis if k['KpiType'] != 'browser']
 
-        log(f"Assets: {len(assets)} | KPIs: {len(kpis)} (browser: {len(browser_kpis)}, other: {len(non_browser_kpis)})")
-        log(f"Parallel workers: {PARALLEL_WORKERS}")
+        log(f"Assets: {len(assets)} | KPIs: {len(kpis)} (browser: {len(browser_kpis)}, other: {len(non_browser_kpis)}) | Workers: {PARALLEL_WORKERS}")
 
-        total_checks = 0
-        total_hits = 0
-        total_misses = 0
-        total_skipped = 0
+        totals = run_parallel_and_log_in_order(assets, process_single_asset_daily, (non_browser_kpis, browser_kpis, incident_frequency))
 
-        # Pre-check which assets are reachable (HTTP HEAD) to skip down sites entirely
-        down_asset_ids = set()
-        all_kpis = list(non_browser_kpis) + list(browser_kpis)
-
-        log("Pre-checking site availability...")
-        for asset in assets:
-            try:
-                resp = requests.head(asset['AssetUrl'], timeout=10, verify=False, allow_redirects=True)
-                if resp.status_code >= 500:
-                    down_asset_ids.add(asset['Id'])
-                    log(f"  [DOWN] {asset['AssetName']} - HTTP {resp.status_code}")
-            except:
-                down_asset_ids.add(asset['Id'])
-                log(f"  [DOWN] {asset['AssetName']} - unreachable")
-
-        if down_asset_ids:
-            log(f"{len(down_asset_ids)} assets are down - skipping all KPIs for them")
-            for asset in assets:
-                if asset['Id'] in down_asset_ids:
-                    for kpi in all_kpis:
-                        total_checks += 1
-                        is_down_kpi = 'completely down' in kpi['KpiName'].lower()
-                        if is_down_kpi:
-                            total_misses += 1
-                            down_result = {'flag': False, 'value': None, 'details': 'Site is down (pre-check failed)'}
-                            result_id = store_result(cursor, asset['Id'], kpi['Id'], down_result, kpi['Outcome'], target_override="miss")
-                            result_value = format_result_value(down_result, kpi['Outcome'])
-                            store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "miss", result_value, 'Site is down (pre-check failed)')
-                            log(f"  [MISS] {asset['AssetName']} > {kpi['KpiName']} (site is down)")
-                        else:
-                            total_skipped += 1
-                            skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down (pre-check failed)'}
-                            result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
-                            result_value = format_result_value(skipped_result, kpi['Outcome'])
-                            store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down (pre-check failed)')
-                            log(f"  [SKIP] {asset['AssetName']} > {kpi['KpiName']} (site is down)")
-                    conn.commit()
-                    recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
-                    conn.commit()
-
-        # Filter to only reachable assets
-        reachable_assets = [a for a in assets if a['Id'] not in down_asset_ids]
-
-        # First, run non-browser KPIs sequentially (they're fast)
-        if non_browser_kpis and reachable_assets:
-            log("Running non-browser KPIs sequentially...")
-            for asset in reachable_assets:
-                for kpi in non_browser_kpis:
-                    total_checks += 1
-                    result = run_kpi_for_asset(cursor, asset, kpi, incident_frequency)
-
-                    if result == "hit":
-                        total_hits += 1
-                    elif result == "miss":
-                        total_misses += 1
-                    elif result == "skipped":
-                        total_skipped += 1
-
-                conn.commit()
-
-        # Then, run browser KPIs in parallel (only for reachable assets)
-        if browser_kpis and reachable_assets:
-            log(f"Running browser KPIs in parallel ({len(reachable_assets)} reachable assets, {PARALLEL_WORKERS} workers)...")
-
-            with ThreadPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
-                # Submit only reachable assets for parallel processing
-                futures = {
-                    executor.submit(process_single_asset_browser_kpis, asset, browser_kpis, incident_frequency): asset
-                    for asset in reachable_assets
-                }
-
-                # Collect results as they complete
-                for future in as_completed(futures):
-                    asset = futures[future]
-                    try:
-                        counts = future.result()
-                        total_checks += counts['checks']
-                        total_hits += counts['hits']
-                        total_misses += counts['misses']
-                        total_skipped += counts['skipped']
-                    except Exception as e:
-                        log(f"[ERROR] Failed processing {asset['AssetName']}: {str(e)}", "error")
-
-        log(f"Summary: {total_checks} checks | {total_hits} hits | {total_misses} misses | {total_skipped} skipped")
+        log(f"Summary: {totals['checks']} checks | {totals['hits']} hits | {totals['misses']} misses | {totals['skipped']} skipped")
 
     except Exception as e:
         log(f"[ERROR] {str(e)}", "error")
@@ -1184,15 +1608,15 @@ def run_daily_kpis_parallel():
 
 def job_1_minute():
     """Job for 1-minute frequency KPIs"""
-    run_kpis_by_frequency("1 min")
+    run_1min_kpis()
 
 def job_5_minute():
     """Job for 5-minute frequency KPIs"""
-    run_kpis_by_frequency("5 min")
+    run_5min_kpis()
 
 def job_15_minute():
     """Job for 15-minute frequency KPIs"""
-    run_kpis_by_frequency("15 min")
+    run_15min_kpis()
 
 def job_daily():
     """Job for daily frequency KPIs - uses parallel processing"""
@@ -1208,9 +1632,10 @@ def run_all_now():
     log("RUNNING ALL KPIs (TEST MODE)")
     log("=" * 80)
 
-    frequencies = ["1 min", "5 min", "15 min", "Daily"]
-    for freq in frequencies:
-        run_kpis_by_frequency(freq)
+    run_1min_kpis()
+    run_5min_kpis()
+    run_15min_kpis()
+    run_daily_kpis_parallel()
 
     log("=" * 80)
     log("ALL KPIs COMPLETED")
@@ -1425,7 +1850,16 @@ if __name__ == "__main__":
     elif args.test:
         run_all_now()
     elif args.frequency:
-        run_kpis_by_frequency(args.frequency)
+        if args.frequency == "1 min":
+            run_1min_kpis()
+        elif args.frequency == "5 min":
+            run_5min_kpis()
+        elif args.frequency == "15 min":
+            run_15min_kpis()
+        elif args.frequency == "Daily":
+            run_daily_kpis_parallel()
+        else:
+            log(f"Unknown frequency: {args.frequency}", "error")
     elif args.run_daemon:
         # Internal: called when starting as daemon
         start_scheduler()
