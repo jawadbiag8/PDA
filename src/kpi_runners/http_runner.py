@@ -1,7 +1,7 @@
 import requests
 import ssl
 from src.kpi_runners.base import BaseKPIRunner
-from src.config.settings import DEFAULT_TIMEOUT
+from src.config.settings import DEFAULT_TIMEOUT, FLAPPING_TIMEOUT
 from urllib3.util.ssl_ import create_urllib3_context
 from requests.adapters import HTTPAdapter
 import urllib3
@@ -60,7 +60,7 @@ class HttpKPIRunner(BaseKPIRunner):
                 for i in range(attempts):
                     try:
                         start = time.time()
-                        resp = session.get(url, timeout=5, verify=False)
+                        resp = session.get(url, timeout=FLAPPING_TIMEOUT, verify=False)
                         elapsed = time.time() - start
                         success_times.append(elapsed)
                     except requests.exceptions.Timeout:
