@@ -1,6 +1,7 @@
 import requests
 import ssl
 from src.kpi_runners.base import BaseKPIRunner
+from src.config.settings import DEFAULT_TIMEOUT
 from urllib3.util.ssl_ import create_urllib3_context
 from requests.adapters import HTTPAdapter
 import urllib3
@@ -27,7 +28,7 @@ class HttpKPIRunner(BaseKPIRunner):
         session.mount('https://', GovernmentSSLAdapter())
 
         try:
-            response = session.get(url, timeout=10, verify=False)
+            response = session.get(url, timeout=DEFAULT_TIMEOUT, verify=False)
             response_time = response.elapsed.total_seconds()
             
             # Website completely down (no response)
