@@ -24,7 +24,12 @@ class HttpKPIRunner(BaseKPIRunner):
         url = self.asset['url']
         kpi_name = self.kpi.get('kpi_name', '').lower()
 
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+        }
+
         session = requests.Session()
+        session.headers.update(headers)
         session.mount('https://', GovernmentSSLAdapter())
 
         try:
