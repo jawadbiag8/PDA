@@ -1729,11 +1729,11 @@ def start_scheduler():
     # Schedule jobs with coalesce=True to merge missed runs, and misfire_grace_time
     # coalesce=True: If job was missed multiple times, run only once
     # misfire_grace_time: How many seconds late a job can be and still run
-    _scheduler.add_job(job_1_minute, IntervalTrigger(minutes=1), id='kpi_1min', name='1-minute KPIs',
+    _scheduler.add_job(job_1_minute, IntervalTrigger(minutes=3), id='kpi_1min', name='1-minute KPIs',
                        coalesce=True, max_instances=1, misfire_grace_time=60)
-    _scheduler.add_job(job_5_minute, IntervalTrigger(minutes=5), id='kpi_5min', name='5-minute KPIs',
+    _scheduler.add_job(job_5_minute, IntervalTrigger(minutes=10), id='kpi_5min', name='5-minute KPIs',
                        coalesce=True, max_instances=1, misfire_grace_time=120)
-    _scheduler.add_job(job_15_minute, IntervalTrigger(minutes=15), id='kpi_15min', name='15-minute KPIs',
+    _scheduler.add_job(job_15_minute, IntervalTrigger(minutes=20), id='kpi_15min', name='15-minute KPIs',
                        coalesce=True, max_instances=1, misfire_grace_time=180)
     _scheduler.add_job(job_daily, CronTrigger(hour=DAILY_RUN_HOUR, minute=DAILY_RUN_MINUTE), id='kpi_daily', name='Daily KPIs',
                        coalesce=True, max_instances=1, misfire_grace_time=300)
