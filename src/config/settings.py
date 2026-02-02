@@ -11,3 +11,4 @@ DB_PASS = os.getenv("DB_PASS")
 
 DEFAULT_TIMEOUT = 20  # seconds
 FLAPPING_TIMEOUT = 5  # seconds
+RETRY_DELAY = 3  # seconds between retries

@@ -860,8 +860,9 @@ def process_single_asset_1min(asset, kpis, incident_freq):
             log(f"  {symbol} {kpi['KpiName']}")
 
             if 'completely down' in kpi_name_lower and result == "miss":
-                site_is_down = True
-                log(f"  >> Site is DOWN - skipping remaining KPIs for this asset")
+                if check_consecutive_failures(cursor, asset['Id'], kpi['Id'], 2):
+                    site_is_down = True
+                    log(f"  >> Site is DOWN (2 consecutive failures) - skipping remaining KPIs")
 
         conn.commit()
         recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))

@@ -1,7 +1,7 @@
 import requests
 import ssl
 from src.kpi_runners.base import BaseKPIRunner
-from src.config.settings import DEFAULT_TIMEOUT, FLAPPING_TIMEOUT
+from src.config.settings import DEFAULT_TIMEOUT, FLAPPING_TIMEOUT, RETRY_DELAY
 from urllib3.util.ssl_ import create_urllib3_context
 from requests.adapters import HTTPAdapter
 import urllib3
@@ -32,27 +32,40 @@ class HttpKPIRunner(BaseKPIRunner):
         session.headers.update(headers)
         session.mount('https://', GovernmentSSLAdapter())
 
+        # Website completely down — use HEAD with retry
+        if 'completely down' in kpi_name:
+            import time
+            for attempt in range(2):
+                try:
+                    response = session.head(url, timeout=DEFAULT_TIMEOUT, verify=False, allow_redirects=True)
+                    return {
+                        "flag": False,  # No problem - site is UP
+                        "value": response.status_code,
+                        "details": f"Site is UP - Status: {response.status_code}, Response time: {response.elapsed.total_seconds():.2f}s"
+                    }
+                except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.RequestException):
+                    if attempt == 0:
+                        time.sleep(RETRY_DELAY)
+            return {
+                "flag": True,
+                "value": None,
+                "details": "Site unreachable after retry"
+            }
+
+        # All other KPIs use GET
         try:
             response = session.get(url, timeout=DEFAULT_TIMEOUT, verify=False)
             response_time = response.elapsed.total_seconds()
-            
-            # Website completely down (no response)
-            if 'completely down' in kpi_name:
-                return {
-                    "flag": False,  # No problem - site is UP
-                    "value": response.status_code,
-                    "details": f"Site is UP - Status: {response.status_code}, Response time: {response_time:.2f}s, Server: {response.headers.get('Server', 'Unknown')}"
-                }
 
             # Hosting/network outage
-            elif 'hosting' in kpi_name or 'network outage' in kpi_name:
+            if 'hosting' in kpi_name or 'network outage' in kpi_name:
                 content_length = len(response.content) if response.content else 0
                 return {
                     "flag": False,  # No problem - site is accessible
                     "value": response.status_code,
                     "details": f"Site accessible - Status: {response.status_code}, Response time: {response_time:.2f}s, Content size: {content_length} bytes"
                 }
-            
+
             # Intermittent availability (flapping)
             elif 'intermittent' in kpi_name or 'flapping' in kpi_name:
                 # Check multiple times to detect flapping
@@ -94,7 +107,7 @@ class HttpKPIRunner(BaseKPIRunner):
                     "value": f"{failures}/{attempts}",
                     "details": detail_msg
                 }
-            
+
             # Backend response time
             elif 'backend response' in kpi_name or 'response time' in kpi_name:
                 slow_threshold = 3.0  # Consider slow if > 3 seconds
@@ -103,7 +116,7 @@ class HttpKPIRunner(BaseKPIRunner):
                     "value": round(response_time, 2),
                     "details": f"Response time: {response_time:.2f}s ({'SLOW' if response_time > slow_threshold else 'OK'})"
                 }
-            
+
             # Website not using HTTPS
             elif 'not using https' in kpi_name or 'https' in kpi_name:
                 is_https = url.startswith('https://')
@@ -112,7 +125,7 @@ class HttpKPIRunner(BaseKPIRunner):
                     "value": 'HTTPS' if is_https else 'HTTP',
                     "details": f"Protocol: {'HTTPS ✓' if is_https else 'HTTP ✗'}"
                 }
-            
+
             # Default HTTP check
             else:
                 return {
