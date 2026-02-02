@@ -1829,7 +1829,14 @@ def start_daemon():
             pid = os.fork()
             if pid > 0:
                 sys.exit(0)
-            # Now we're the daemon
+            # Now we're the daemon - redirect std streams to /dev/null
+            sys.stdout.flush()
+            sys.stderr.flush()
+            devnull = os.open(os.devnull, os.O_RDWR)
+            os.dup2(devnull, 0)  # stdin
+            os.dup2(devnull, 1)  # stdout
+            os.dup2(devnull, 2)  # stderr
+            os.close(devnull)
             start_scheduler()
 
 if __name__ == "__main__":
