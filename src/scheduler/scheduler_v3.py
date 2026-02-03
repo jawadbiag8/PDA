@@ -326,6 +326,12 @@ def auto_close_incident(cursor, asset_id, kpi_id):
             """, (incident['AssetId'], incident['Id'], incident['KpiId'], incident['IncidentTitle'],
                   incident['Description'], incident['Type'], incident['SeverityId'], incident['AssignedTo']))
 
+            # Insert into IncidentComments
+            cursor.execute("""
+                INSERT INTO IncidentComments (IncidentId, Comment, Status, CreatedBy, CreatedAt)
+                VALUES (%s, 'Auto Generated Incident', 'RESOLVED', 'pda', NOW())
+            """, (incident['Id'],))
+
             closed_count += 1
             log(f"[AUTO-CLOSE] Incident #{incident['Id']} resolved")
 
@@ -402,6 +408,12 @@ def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
                                             Type, SeverityId, StatusId, AssignedTo, CreatedBy, CreatedAt)
             VALUES (%s, %s, %s, %s, %s, 'auto', %s, 8, 'pda@dams.com', 'system', NOW())
         """, (asset_id, incident_id, kpi_id, incident_title, description, severity_id))
+
+        # Insert into IncidentComments
+        cursor.execute("""
+            INSERT INTO IncidentComments (IncidentId, Comment, Status, CreatedBy, CreatedAt)
+            VALUES (%s, 'Auto Generated Incident', 'OPEN', 'pda', NOW())
+        """, (incident_id,))
 
         return incident_id, True
     except Exception as e:
