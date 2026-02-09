@@ -322,7 +322,7 @@ def auto_close_incident(cursor, asset_id, kpi_id):
             cursor.execute("""
                 INSERT INTO IncidentHistories (AssetId, IncidentId, KpiId, IncidentTitle, Description,
                                                 Type, SeverityId, StatusId, AssignedTo, CreatedBy, CreatedAt)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 12, %s, 'system', NOW())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 12, %s, 'System Generated', NOW())
             """, (incident['AssetId'], incident['Id'], incident['KpiId'], incident['IncidentTitle'],
                   incident['Description'], incident['Type'], incident['SeverityId'], incident['AssignedTo']))
 
@@ -397,7 +397,7 @@ def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
         cursor.execute("""
             INSERT INTO Incidents (AssetId, KpiId, IncidentTitle, Description,
                                    Type, SeverityId, StatusId, AssignedTo, CreatedBy, CreatedAt)
-            VALUES (%s, %s, %s, %s, 'auto', %s, 8, 'pda@dams.com', 'system', NOW())
+            VALUES (%s, %s, %s, %s, 'auto', %s, 8, 'pda@dams.com', 'System Generated', NOW())
         """, (asset_id, kpi_id, incident_title, description, severity_id))
 
         incident_id = cursor.lastrowid
@@ -406,7 +406,7 @@ def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
         cursor.execute("""
             INSERT INTO IncidentHistories (AssetId, IncidentId, KpiId, IncidentTitle, Description,
                                             Type, SeverityId, StatusId, AssignedTo, CreatedBy, CreatedAt)
-            VALUES (%s, %s, %s, %s, %s, 'auto', %s, 8, 'pda@dams.com', 'system', NOW())
+            VALUES (%s, %s, %s, %s, %s, 'auto', %s, 8, 'pda@dams.com', 'System Generated', NOW())
         """, (asset_id, incident_id, kpi_id, incident_title, description, severity_id))
 
         # Insert into IncidentComments
@@ -959,7 +959,7 @@ def process_single_asset_5min(asset, kpis, incident_freq):
     try:
         log(f"Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'}) | URL: {asset['AssetUrl']}")
 
-        # Pre-check: is the site reachable?
+        # Pre-check: is the site reachable? (HEAD first, GET fallback)
         site_is_down = False
         try:
             resp = requests.head(asset['AssetUrl'], timeout=10, verify=False, allow_redirects=True)
@@ -967,8 +967,15 @@ def process_single_asset_5min(asset, kpis, incident_freq):
                 site_is_down = True
                 log(f"  [DOWN] Site returned HTTP {resp.status_code}")
         except:
-            site_is_down = True
-            log(f"  [DOWN] Site unreachable")
+            # HEAD failed — fallback to GET (some servers reject HEAD)
+            try:
+                resp = requests.get(asset['AssetUrl'], timeout=10, verify=False, allow_redirects=True)
+                if resp.status_code >= 500:
+                    site_is_down = True
+                    log(f"  [DOWN] Site returned HTTP {resp.status_code} (GET fallback)")
+            except:
+                site_is_down = True
+                log(f"  [DOWN] Site unreachable")
 
         if site_is_down:
             for kpi in kpis:
@@ -1089,7 +1096,7 @@ def process_single_asset_15min(asset, non_browser_kpis, browser_kpis, incident_f
     try:
         log(f"Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'}) | URL: {asset['AssetUrl']}")
 
-        # Pre-check: is the site reachable?
+        # Pre-check: is the site reachable? (HEAD first, GET fallback)
         site_is_down = False
         try:
             resp = requests.head(asset['AssetUrl'], timeout=10, verify=False, allow_redirects=True)
@@ -1097,8 +1104,15 @@ def process_single_asset_15min(asset, non_browser_kpis, browser_kpis, incident_f
                 site_is_down = True
                 log(f"  [DOWN] Site returned HTTP {resp.status_code}")
         except:
-            site_is_down = True
-            log(f"  [DOWN] Site unreachable")
+            # HEAD failed — fallback to GET (some servers reject HEAD)
+            try:
+                resp = requests.get(asset['AssetUrl'], timeout=10, verify=False, allow_redirects=True)
+                if resp.status_code >= 500:
+                    site_is_down = True
+                    log(f"  [DOWN] Site returned HTTP {resp.status_code} (GET fallback)")
+            except:
+                site_is_down = True
+                log(f"  [DOWN] Site unreachable")
 
         if site_is_down:
             all_kpis = list(non_browser_kpis) + list(browser_kpis)
@@ -1307,7 +1321,7 @@ def run_kpis_by_frequency(frequency_filter):
         for asset in assets:
             log(f"Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'}) | URL: {asset['AssetUrl']}")
 
-            # Pre-check: is the site reachable?
+            # Pre-check: is the site reachable? (HEAD first, GET fallback)
             site_is_down = False
             try:
                 resp = requests.head(asset['AssetUrl'], timeout=10, verify=False, allow_redirects=True)
@@ -1315,8 +1329,15 @@ def run_kpis_by_frequency(frequency_filter):
                     site_is_down = True
                     log(f"  [DOWN] Site returned HTTP {resp.status_code}")
             except:
-                site_is_down = True
-                log(f"  [DOWN] Site unreachable")
+                # HEAD failed — fallback to GET (some servers reject HEAD)
+                try:
+                    resp = requests.get(asset['AssetUrl'], timeout=10, verify=False, allow_redirects=True)
+                    if resp.status_code >= 500:
+                        site_is_down = True
+                        log(f"  [DOWN] Site returned HTTP {resp.status_code} (GET fallback)")
+                except:
+                    site_is_down = True
+                    log(f"  [DOWN] Site unreachable")
 
             if site_is_down:
                 all_freq_kpis = list(non_browser_kpis) + list(browser_kpis)
@@ -1454,7 +1475,7 @@ def process_single_asset_daily(asset, non_browser_kpis, browser_kpis, incident_f
     try:
         log(f"Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'}) | URL: {asset['AssetUrl']}")
 
-        # Pre-check: is the site reachable?
+        # Pre-check: is the site reachable? (HEAD first, GET fallback)
         site_is_down = False
         try:
             resp = requests.head(asset['AssetUrl'], timeout=10, verify=False, allow_redirects=True)
@@ -1462,8 +1483,15 @@ def process_single_asset_daily(asset, non_browser_kpis, browser_kpis, incident_f
                 site_is_down = True
                 log(f"  [DOWN] Site returned HTTP {resp.status_code}")
         except:
-            site_is_down = True
-            log(f"  [DOWN] Site unreachable")
+            # HEAD failed — fallback to GET (some servers reject HEAD)
+            try:
+                resp = requests.get(asset['AssetUrl'], timeout=10, verify=False, allow_redirects=True)
+                if resp.status_code >= 500:
+                    site_is_down = True
+                    log(f"  [DOWN] Site returned HTTP {resp.status_code} (GET fallback)")
+            except:
+                site_is_down = True
+                log(f"  [DOWN] Site unreachable")
 
         if site_is_down:
             all_kpis = list(non_browser_kpis) + list(browser_kpis)

@@ -32,24 +32,35 @@ class HttpKPIRunner(BaseKPIRunner):
         session.headers.update(headers)
         session.mount('https://', GovernmentSSLAdapter())
 
-        # Website completely down — use HEAD with retry
+        # Website completely down — try HEAD first, fallback to GET if HEAD fails
         if 'completely down' in kpi_name:
             import time
+            # Try HEAD with retry
             for attempt in range(2):
                 try:
                     response = session.head(url, timeout=DEFAULT_TIMEOUT, verify=False, allow_redirects=True)
                     return {
                         "flag": False,  # No problem - site is UP
                         "value": response.status_code,
-                        "details": f"Site is UP - Status: {response.status_code}, Response time: {response.elapsed.total_seconds():.2f}s"
+                        "details": f"Site is UP (HEAD) - Status: {response.status_code}, Response time: {response.elapsed.total_seconds():.2f}s"
                     }
                 except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.RequestException):
                     if attempt == 0:
                         time.sleep(RETRY_DELAY)
+            # HEAD failed — fallback to GET (some servers reject HEAD)
+            try:
+                response = session.get(url, timeout=DEFAULT_TIMEOUT, verify=False, allow_redirects=True)
+                return {
+                    "flag": False,  # No problem - site is UP
+                    "value": response.status_code,
+                    "details": f"Site is UP (GET fallback) - Status: {response.status_code}, Response time: {response.elapsed.total_seconds():.2f}s"
+                }
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError, requests.exceptions.RequestException):
+                pass
             return {
                 "flag": True,
                 "value": None,
-                "details": "Site unreachable after retry"
+                "details": "Site unreachable after HEAD retry and GET fallback"
             }
 
         # All other KPIs use GET
