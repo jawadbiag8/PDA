@@ -186,11 +186,14 @@ def manual_kpi_check(request: ManualCheckRequest):
 
 def _run_manual_kpi_check(asset, kpi):
     """Background worker: run a single KPI check with full logic (results, incidents, metrics)."""
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    conn = None
+    cursor = None
 
     try:
         log(f"[MANUAL] Triggered: {kpi['KpiName']} for {asset['AssetName']} (Asset {asset['Id']}) | URL: {asset['AssetUrl']}")
+
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
 
         # Get incident creation frequency
         cursor.execute("""
@@ -230,13 +233,18 @@ def _run_manual_kpi_check(asset, kpi):
 
     except Exception as e:
         log(f"[MANUAL] [ERROR] {kpi['KpiName']} for {asset['AssetName']}: {str(e)}", "error")
+        import traceback
+        log(f"[MANUAL] [TRACEBACK] {traceback.format_exc()}", "error")
         try:
-            conn.commit()
+            if conn:
+                conn.commit()
         except:
             pass
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 
 API_PID_FILE = os.path.join(MANUAL_LOG_PATH, "api_server.pid")
