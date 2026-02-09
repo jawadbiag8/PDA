@@ -40,6 +40,7 @@ def setup_manual_logging():
 
     logger = logging.getLogger("manual_kpi")
     logger.setLevel(logging.INFO)
+    logger.propagate = False  # Don't propagate to root logger (prevents writing to auto log files)
 
     # Avoid adding duplicate handlers on reimport
     if not logger.handlers:
@@ -250,11 +251,26 @@ def _run_manual_kpi_check(asset, kpi):
 API_PID_FILE = os.path.join(MANUAL_LOG_PATH, "api_server.pid")
 
 
+def _find_pid_by_port():
+    """Find PID of the process listening on API_PORT (fallback when PID file is missing)"""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ['lsof', '-ti', f':{API_PORT}'],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return int(result.stdout.strip().split('\n')[0])
+    except Exception:
+        pass
+    return None
+
+
 def start_detached():
     """Start the API server as a detached background process"""
     os.makedirs(MANUAL_LOG_PATH, exist_ok=True)
 
-    # Check if already running
+    # Check if already running via PID file
     if os.path.exists(API_PID_FILE):
         try:
             with open(API_PID_FILE, 'r') as f:
@@ -272,6 +288,12 @@ def start_detached():
         except (ValueError, ProcessLookupError, OSError):
             os.remove(API_PID_FILE)
 
+    # Also check if something is already listening on the port
+    existing_pid = _find_pid_by_port()
+    if existing_pid:
+        print(f"Port {API_PORT} is already in use (PID: {existing_pid}). Stop it first.")
+        return
+
     script_path = os.path.abspath(__file__)
 
     if sys.platform == 'win32':
@@ -288,51 +310,49 @@ def start_detached():
         print(f"Listening on: http://{API_HOST}:{API_PORT}")
         print(f"Logs: {MANUAL_LOG_PATH}")
     else:
-        pid = os.fork()
-        if pid > 0:
-            print(f"API server started in background (PID: {pid})")
-            print(f"Logs: {MANUAL_LOG_PATH}")
-            return
-        else:
-            os.setsid()
-            pid = os.fork()
-            if pid > 0:
-                sys.exit(0)
-            # Redirect std streams
-            sys.stdout.flush()
-            sys.stderr.flush()
-            devnull = os.open(os.devnull, os.O_RDWR)
-            os.dup2(devnull, 0)
-            os.dup2(devnull, 1)
-            os.dup2(devnull, 2)
-            os.close(devnull)
-            _run_server()
+        # Unix: use subprocess instead of double-fork for reliable PID tracking
+        import subprocess
+        process = subprocess.Popen(
+            [sys.executable, script_path, '--run-server'],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True
+        )
+        print(f"API server started in background (PID: {process.pid})")
+        print(f"Listening on: http://{API_HOST}:{API_PORT}")
+        print(f"Logs: {MANUAL_LOG_PATH}")
 
 
 def stop_server():
     """Stop the running API server"""
-    if not os.path.exists(API_PID_FILE):
-        print("API server is not running.")
-        return
+    pid = None
 
-    try:
-        with open(API_PID_FILE, 'r') as f:
-            pid = int(f.read().strip())
-    except (ValueError, FileNotFoundError):
+    # Try PID file first
+    if os.path.exists(API_PID_FILE):
+        try:
+            with open(API_PID_FILE, 'r') as f:
+                pid = int(f.read().strip())
+            # Verify the PID is actually running
+            os.kill(pid, 0)
+        except (ValueError, ProcessLookupError, OSError):
+            pid = None
+            if os.path.exists(API_PID_FILE):
+                os.remove(API_PID_FILE)
+
+    # Fallback: find by port
+    if not pid:
+        pid = _find_pid_by_port()
+
+    if not pid:
         print("API server is not running.")
-        if os.path.exists(API_PID_FILE):
-            os.remove(API_PID_FILE)
         return
 
     print(f"Stopping API server (PID: {pid})...")
 
     try:
-        if sys.platform == 'win32':
-            import subprocess
-            subprocess.run(['taskkill', '/F', '/PID', str(pid)], check=True)
-        else:
-            import signal
-            os.kill(pid, signal.SIGTERM)
+        import signal
+        os.kill(pid, signal.SIGTERM)
 
         import time
         time.sleep(2)
@@ -340,23 +360,14 @@ def stop_server():
         # Verify it stopped
         still_running = False
         try:
-            if sys.platform == 'win32':
-                import subprocess
-                result = subprocess.run(['tasklist', '/FI', f'PID eq {pid}'], capture_output=True, text=True)
-                still_running = str(pid) in result.stdout
-            else:
-                os.kill(pid, 0)
-                still_running = True
+            os.kill(pid, 0)
+            still_running = True
         except (ProcessLookupError, OSError):
             pass
 
         if still_running:
             print("Server did not stop gracefully, forcing...")
-            if sys.platform == 'win32':
-                import subprocess
-                subprocess.run(['taskkill', '/F', '/PID', str(pid)], check=True)
-            else:
-                os.kill(pid, signal.SIGKILL)
+            os.kill(pid, signal.SIGKILL)
 
         if os.path.exists(API_PID_FILE):
             os.remove(API_PID_FILE)
