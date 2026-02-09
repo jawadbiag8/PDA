@@ -56,8 +56,8 @@ DB_CONFIG = {
 }
 
 # Logging configuration
-LOG_PATH = os.getenv("LOG_PATH", "/var/logs/kpiAutomationLogs/")
-PID_FILE = os.path.join(LOG_PATH, "scheduler.pid")
+AUTO_LOG_PATH = os.getenv("AUTO_LOG_PATH", "/var/logs/kpiAutomationLogs/")
+PID_FILE = os.path.join(AUTO_LOG_PATH, "scheduler.pid")
 
 # Daily KPIs run time (24-hour format) - configurable via .env
 DAILY_RUN_HOUR = int(os.getenv("DAILY_RUN_HOUR", "15"))  # Default: 3 PM
@@ -73,11 +73,11 @@ PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "5"))  # Default: 5 paralle
 def setup_logging():
     """Setup date-wise logging to file"""
     # Create log directory if it doesn't exist
-    os.makedirs(LOG_PATH, exist_ok=True)
+    os.makedirs(AUTO_LOG_PATH, exist_ok=True)
 
     # Date-wise log file name
     log_filename = datetime.now().strftime("%Y-%m-%d") + ".log"
-    log_file = os.path.join(LOG_PATH, log_filename)
+    log_file = os.path.join(AUTO_LOG_PATH, log_filename)
 
     # Configure logging
     logging.basicConfig(
@@ -106,7 +106,7 @@ def log(message, level="info"):
 
     # Check if date changed, rotate log file if needed
     current_date = datetime.now().strftime("%Y-%m-%d")
-    expected_log_file = os.path.join(LOG_PATH, f"{current_date}.log")
+    expected_log_file = os.path.join(AUTO_LOG_PATH, f"{current_date}.log")
 
     # Check if we need to rotate to a new date file
     for handler in logger.handlers:
@@ -1684,7 +1684,7 @@ def run_all_now():
 
 def write_pid_file():
     """Write current process PID to file"""
-    os.makedirs(LOG_PATH, exist_ok=True)
+    os.makedirs(AUTO_LOG_PATH, exist_ok=True)
     with open(PID_FILE, 'w') as f:
         f.write(str(os.getpid()))
     log(f"PID file created: {PID_FILE} (PID: {os.getpid()})")
@@ -1763,7 +1763,7 @@ def start_scheduler():
     log(f"  - 5 min KPIs: Every 5 minutes")
     log(f"  - 15 min KPIs: Every 15 minutes")
     log(f"  - Daily KPIs: Every day at {DAILY_RUN_HOUR:02d}:{DAILY_RUN_MINUTE:02d}")
-    log(f"Log Path: {LOG_PATH}")
+    log(f"Log Path: {AUTO_LOG_PATH}")
     log(f"PID File: {PID_FILE}")
 
     # Schedule jobs with coalesce=True to merge missed runs, and misfire_grace_time
@@ -1853,14 +1853,14 @@ def start_daemon():
             stdin=subprocess.DEVNULL
         )
         print(f"Scheduler started in background (PID: {process.pid})")
-        print(f"Logs are being written to: {LOG_PATH}")
+        print(f"Logs are being written to: {AUTO_LOG_PATH}")
     else:
         # Unix: fork and detach
         pid = os.fork()
         if pid > 0:
             # Parent process
             print(f"Scheduler started in background (PID: {pid})")
-            print(f"Logs are being written to: {LOG_PATH}")
+            print(f"Logs are being written to: {AUTO_LOG_PATH}")
             sys.exit(0)
         else:
             # Child process - become daemon
