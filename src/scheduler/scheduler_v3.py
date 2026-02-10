@@ -438,8 +438,8 @@ def store_result(cursor, asset_id, kpi_id, result, outcome_type, target_value=No
             )
 
         cursor.execute("""
-            INSERT INTO kpisResults (AssetId, KpiId, Result, Details, CreatedAt, Target)
-            VALUES (%s, %s, %s, %s, NOW(), %s)
+            INSERT INTO kpisResults (AssetId, KpiId, Result, Details, CreatedAt, UpdatedAt, Target)
+            VALUES (%s, %s, %s, %s, NOW(), NOW(), %s)
             ON DUPLICATE KEY UPDATE
                 Result = VALUES(Result),
                 Details = VALUES(Details),
