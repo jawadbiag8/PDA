@@ -50,7 +50,6 @@ logs/
 *.db
 *.sqlite3
 database/
-documents/
 
 # OS
 .DS_Store

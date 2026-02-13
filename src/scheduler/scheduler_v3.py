@@ -264,8 +264,13 @@ def determine_target_hit_miss(result_value, target_value, outcome_type, runner_f
         return "miss" if runner_flag else "hit"
 
     try:
-        result_num = float(result_value) if result_value else 0
-        target_num = float(target_value)
+        # Strip non-numeric characters (e.g., "%", "s", "MB") before comparison
+        import re
+        clean_result = re.sub(r'[^0-9.\-]', '', str(result_value)) if result_value else '0'
+        clean_target = re.sub(r'[^0-9.\-]', '', str(target_value)) if target_value else '0'
+
+        result_num = float(clean_result) if clean_result else 0
+        target_num = float(clean_target) if clean_target else 0
 
         if outcome_type in ['Sec', 'MB']:
             return "hit" if result_num <= target_num else "miss"
