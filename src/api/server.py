@@ -12,6 +12,7 @@ import sys
 import os
 import logging
 import threading
+import requests as http_requests
 from datetime import datetime
 
 # Add project root to Python path
@@ -97,6 +98,11 @@ from src.kpi_runners.browser_runner import SharedBrowserContext
 API_HOST = os.getenv("API_HOST", "0.0.0.0")
 API_PORT = int(os.getenv("API_PORT", "8000"))
 
+# Backend API (for control panel notifications)
+BACKEND_URL = os.getenv("BACKEND_URL", "https://localhost:7008")
+BACKEND_USERNAME = os.getenv("BACKEND_USERNAME", "")
+BACKEND_PASSWORD = os.getenv("BACKEND_PASSWORD", "")
+
 # Estimated completion times by KPI type (for user-facing message)
 ESTIMATED_TIMES = {
     'http': '5-10 seconds',
@@ -105,6 +111,48 @@ ESTIMATED_TIMES = {
     'browser': '15-20 seconds',
     'accessibility': '20-30 seconds',
 }
+
+# ============================================================
+# BACKEND NOTIFICATION
+# ============================================================
+
+def _get_backend_token():
+    """Authenticate with the .NET backend and return JWT token"""
+    try:
+        resp = http_requests.post(
+            f"{BACKEND_URL}/api/Auth/login",
+            json={"username": BACKEND_USERNAME, "password": BACKEND_PASSWORD},
+            verify=False,
+            timeout=10
+        )
+        data = resp.json()
+        if data.get("isSuccessful") and data.get("data", {}).get("token"):
+            return data["data"]["token"]
+        else:
+            log(f"[MANUAL] [NOTIFY] Auth failed: {data.get('message', 'Unknown error')}", "error")
+            return None
+    except Exception as e:
+        log(f"[MANUAL] [NOTIFY] Auth error: {str(e)}", "error")
+        return None
+
+
+def _notify_control_panel(asset_id):
+    """Notify the backend control panel that asset data has been updated"""
+    token = _get_backend_token()
+    if not token:
+        return
+
+    try:
+        resp = http_requests.post(
+            f"{BACKEND_URL}/api/Asset/{asset_id}/controlpanel/notify",
+            headers={"Authorization": f"Bearer {token}"},
+            verify=False,
+            timeout=10
+        )
+        log(f"[MANUAL] [NOTIFY] Control panel notified for Asset {asset_id} (HTTP {resp.status_code})")
+    except Exception as e:
+        log(f"[MANUAL] [NOTIFY] Failed for Asset {asset_id}: {str(e)}", "error")
+
 
 # ============================================================
 # FASTAPI APP
@@ -231,6 +279,9 @@ def _run_manual_kpi_check(asset, kpi):
         conn.commit()
 
         log(f"[MANUAL] Completed: {kpi['KpiName']} for {asset['AssetName']} | URL: {asset['AssetUrl']} | Result: {result}")
+
+        # Notify backend control panel
+        _notify_control_panel(asset['Id'])
 
     except Exception as e:
         log(f"[MANUAL] [ERROR] {kpi['KpiName']} for {asset['AssetName']}: {str(e)}", "error")
