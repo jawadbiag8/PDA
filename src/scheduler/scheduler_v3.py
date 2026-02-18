@@ -17,6 +17,7 @@ Usage:
 
 import sys
 import os
+import re
 import logging
 import signal
 import subprocess
@@ -65,6 +66,11 @@ DAILY_RUN_MINUTE = int(os.getenv("DAILY_RUN_MINUTE", "0"))  # Default: Start of 
 
 # Parallel processing for daily KPIs - configurable via .env
 PARALLEL_WORKERS = int(os.getenv("PARALLEL_WORKERS", "5"))  # Default: 5 parallel browsers
+
+# Backend API (for control panel notifications)
+BACKEND_URL = os.getenv("BACKEND_URL", "https://localhost:7008")
+BACKEND_USERNAME = os.getenv("BACKEND_USERNAME", "")
+BACKEND_PASSWORD = os.getenv("BACKEND_PASSWORD", "")
 
 # ============================================================
 # LOGGING SETUP
@@ -137,6 +143,89 @@ def flush_log_buffer(buffer):
             logger.warning(message)
         else:
             logger.info(message)
+
+# ============================================================
+# BACKEND NOTIFICATION
+# ============================================================
+
+def _get_backend_token():
+    """Authenticate with the .NET backend and return JWT token"""
+    try:
+        resp = requests.post(
+            f"{BACKEND_URL}/api/Auth/login",
+            json={"username": BACKEND_USERNAME, "password": BACKEND_PASSWORD},
+            verify=False,
+            timeout=10
+        )
+        data = resp.json()
+        if data.get("isSuccessful") and data.get("data", {}).get("token"):
+            return data["data"]["token"]
+        else:
+            log(f"[NOTIFY] Auth failed: {data.get('message', 'Unknown error')}", "error")
+            return None
+    except Exception as e:
+        log(f"[NOTIFY] Auth error: {str(e)}", "error")
+        return None
+
+
+def notify_control_panel(asset_id):
+    """Notify the backend control panel that asset data has been updated"""
+    token = _get_backend_token()
+    if not token:
+        return
+
+    try:
+        log(f"[NOTIFY] Notifying external system for Asset {asset_id}...")
+        resp = requests.post(
+            f"{BACKEND_URL}/api/Asset/{asset_id}/controlpanel/notify",
+            headers={"Authorization": f"Bearer {token}"},
+            verify=False,
+            timeout=10
+        )
+        log(f"[NOTIFY] Control panel notified for Asset {asset_id} (HTTP {resp.status_code})")
+    except Exception as e:
+        log(f"[NOTIFY] Failed for Asset {asset_id}: {str(e)}", "error")
+
+
+def notify_dashboards():
+    """Notify the backend to refresh dashboards with updated data"""
+    token = _get_backend_token()
+    if not token:
+        return
+
+    try:
+        resp = requests.post(
+            f"{BACKEND_URL}/api/DataUpdate/notify-dashboards",
+            headers={"Authorization": f"Bearer {token}"},
+            verify=False,
+            timeout=10
+        )
+        log(f"[NOTIFY] Dashboards notified (HTTP {resp.status_code})")
+    except Exception as e:
+        log(f"[NOTIFY] Dashboard notification failed: {str(e)}", "error")
+
+
+def notify_incidents(incident_ids):
+    """Notify the backend about incident creation or closure"""
+    if not incident_ids:
+        return
+
+    token = _get_backend_token()
+    if not token:
+        return
+
+    try:
+        resp = requests.post(
+            f"{BACKEND_URL}/api/DataUpdate/notify-incidents",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+            json={"incidentIds": incident_ids},
+            verify=False,
+            timeout=10
+        )
+        log(f"[NOTIFY] Incidents notified {incident_ids} (HTTP {resp.status_code})")
+    except Exception as e:
+        log(f"[NOTIFY] Incident notification failed: {str(e)}", "error")
+
 
 def run_parallel_and_log_in_order(assets, worker_fn, worker_args):
     """Run a worker function across all assets in parallel using ThreadPoolExecutor,
@@ -265,7 +354,6 @@ def determine_target_hit_miss(result_value, target_value, outcome_type, runner_f
 
     try:
         # Strip non-numeric characters (e.g., "%", "s", "MB") before comparison
-        import re
         clean_result = re.sub(r'[^0-9.\-]', '', str(result_value)) if result_value else '0'
         clean_target = re.sub(r'[^0-9.\-]', '', str(target_value)) if target_value else '0'
 
@@ -315,6 +403,7 @@ def auto_close_incident(cursor, asset_id, kpi_id):
 
         incidents = cursor.fetchall()
         closed_count = 0
+        closed_ids = []
 
         for incident in incidents:
             cursor.execute("""
@@ -338,7 +427,11 @@ def auto_close_incident(cursor, asset_id, kpi_id):
             """, (incident['Id'],))
 
             closed_count += 1
+            closed_ids.append(incident['Id'])
             log(f"[AUTO-CLOSE] Incident #{incident['Id']} resolved")
+
+        if closed_ids:
+            notify_incidents(closed_ids)
 
         return closed_count
     except Exception as e:
@@ -420,6 +513,7 @@ def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
             VALUES (%s, 'Auto Generated Incident', 'OPEN', 'pda', NOW())
         """, (incident_id,))
 
+        notify_incidents([incident_id])
         return incident_id, True
     except Exception as e:
         log(f"[ERROR] Creating incident: {str(e)}", "error")
@@ -884,6 +978,8 @@ def process_single_asset_1min(asset, kpis, incident_freq):
         conn.commit()
         recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
         conn.commit()
+        notify_control_panel(asset['Id'])
+        notify_dashboards()
 
     except Exception as e:
         log(f"[ERROR] Asset {asset['AssetName']}: {str(e)}", "error")
@@ -994,6 +1090,8 @@ def process_single_asset_5min(asset, kpis, incident_freq):
             conn.commit()
             recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
             conn.commit()
+            notify_control_panel(asset['Id'])
+            notify_dashboards()
             counts['log_buffer'] = _thread_local.log_buffer
             _thread_local.log_buffer = None
             cursor.close()
@@ -1020,6 +1118,8 @@ def process_single_asset_5min(asset, kpis, incident_freq):
         conn.commit()
         recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
         conn.commit()
+        notify_control_panel(asset['Id'])
+        notify_dashboards()
 
     except Exception as e:
         log(f"[ERROR] Asset {asset['AssetName']}: {str(e)}", "error")
@@ -1132,6 +1232,8 @@ def process_single_asset_15min(asset, non_browser_kpis, browser_kpis, incident_f
             conn.commit()
             recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
             conn.commit()
+            notify_control_panel(asset['Id'])
+            notify_dashboards()
             counts['log_buffer'] = _thread_local.log_buffer
             _thread_local.log_buffer = None
             cursor.close()
@@ -1197,6 +1299,8 @@ def process_single_asset_15min(asset, non_browser_kpis, browser_kpis, incident_f
         conn.commit()
         recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
         conn.commit()
+        notify_control_panel(asset['Id'])
+        notify_dashboards()
 
     except Exception as e:
         log(f"[ERROR] Asset {asset['AssetName']}: {str(e)}", "error")
@@ -1366,6 +1470,8 @@ def run_kpis_by_frequency(frequency_filter):
                 conn.commit()
                 recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
                 conn.commit()
+                notify_control_panel(asset['Id'])
+                notify_dashboards()
                 continue
 
             # Run non-browser KPIs first (they're fast)
@@ -1446,6 +1552,8 @@ def run_kpis_by_frequency(frequency_filter):
             # Recalculate metrics for this asset after all KPIs are done
             recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
             conn.commit()
+            notify_control_panel(asset['Id'])
+            notify_dashboards()
 
         log(f"Summary: {total_checks} checks | {total_hits} hits | {total_misses} misses | {total_skipped} skipped")
 
@@ -1511,6 +1619,8 @@ def process_single_asset_daily(asset, non_browser_kpis, browser_kpis, incident_f
             conn.commit()
             recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
             conn.commit()
+            notify_control_panel(asset['Id'])
+            notify_dashboards()
             counts['log_buffer'] = _thread_local.log_buffer
             _thread_local.log_buffer = None
             cursor.close()
@@ -1576,6 +1686,8 @@ def process_single_asset_daily(asset, non_browser_kpis, browser_kpis, incident_f
         conn.commit()
         recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
         conn.commit()
+        notify_control_panel(asset['Id'])
+        notify_dashboards()
 
     except Exception as e:
         log(f"[ERROR] Asset {asset['AssetName']}: {str(e)}", "error")

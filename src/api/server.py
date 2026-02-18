@@ -13,7 +13,10 @@ import os
 import logging
 import threading
 import requests as http_requests
+import urllib3
 from datetime import datetime
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Add project root to Python path
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -143,6 +146,7 @@ def _notify_control_panel(asset_id):
         return
 
     try:
+        log(f"[MANUAL] [NOTIFY] Notifying external system for Asset {asset_id}...")
         resp = http_requests.post(
             f"{BACKEND_URL}/api/Asset/{asset_id}/controlpanel/notify",
             headers={"Authorization": f"Bearer {token}"},
@@ -152,6 +156,24 @@ def _notify_control_panel(asset_id):
         log(f"[MANUAL] [NOTIFY] Control panel notified for Asset {asset_id} (HTTP {resp.status_code})")
     except Exception as e:
         log(f"[MANUAL] [NOTIFY] Failed for Asset {asset_id}: {str(e)}", "error")
+
+
+def _notify_dashboards():
+    """Notify the backend to refresh dashboards with updated data"""
+    token = _get_backend_token()
+    if not token:
+        return
+
+    try:
+        resp = http_requests.post(
+            f"{BACKEND_URL}/api/DataUpdate/notify-dashboards",
+            headers={"Authorization": f"Bearer {token}"},
+            verify=False,
+            timeout=10
+        )
+        log(f"[MANUAL] [NOTIFY] Dashboards notified (HTTP {resp.status_code})")
+    except Exception as e:
+        log(f"[MANUAL] [NOTIFY] Dashboard notification failed: {str(e)}", "error")
 
 
 # ============================================================
@@ -280,8 +302,9 @@ def _run_manual_kpi_check(asset, kpi):
 
         log(f"[MANUAL] Completed: {kpi['KpiName']} for {asset['AssetName']} | URL: {asset['AssetUrl']} | Result: {result}")
 
-        # Notify backend control panel
+        # Notify backend
         _notify_control_panel(asset['Id'])
+        _notify_dashboards()
 
     except Exception as e:
         log(f"[MANUAL] [ERROR] {kpi['KpiName']} for {asset['AssetName']}: {str(e)}", "error")
