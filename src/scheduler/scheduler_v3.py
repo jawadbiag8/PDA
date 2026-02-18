@@ -741,7 +741,7 @@ def run_kpi_for_asset(cursor, asset, kpi, incident_frequency):
                 log(f"[WAIT] Need {incident_frequency} consecutive misses")
         else:
             # Auto-close only after consecutive hits
-            should_close = check_consecutive_hits(cursor, asset['Id'], kpi['Id'], incident_frequency)
+            should_close = check_consecutive_hits(cursor, asset['Id'], kpi['Id'], 1)
             if should_close:
                 auto_close_incident(cursor, asset['Id'], kpi['Id'])
 
@@ -818,7 +818,7 @@ def run_browser_kpi_with_page(cursor, asset, kpi, incident_frequency, page, load
             else:
                 log(f"[WAIT] Need {incident_frequency} consecutive misses")
         else:
-            should_close = check_consecutive_hits(cursor, asset['Id'], kpi['Id'], incident_frequency)
+            should_close = check_consecutive_hits(cursor, asset['Id'], kpi['Id'], 1)
             if should_close:
                 auto_close_incident(cursor, asset['Id'], kpi['Id'])
 
