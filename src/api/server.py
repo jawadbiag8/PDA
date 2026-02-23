@@ -24,6 +24,7 @@ sys.path.insert(0, project_root)
 
 from fastapi import FastAPI
 from pydantic import BaseModel
+from psycopg2.extras import RealDictCursor
 import uvicorn
 from dotenv import load_dotenv
 
@@ -192,15 +193,15 @@ class ManualCheckRequest(BaseModel):
 def manual_kpi_check(request: ManualCheckRequest):
     """Trigger a manual KPI check for a specific asset. Returns immediately."""
     conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
 
     try:
         # Validate KPI exists
         cursor.execute("""
-            SELECT Id, KpiName, KpiGroup, KpiType, Outcome,
-                   TargetHigh, TargetMedium, TargetLow, Frequency, SeverityId
-            FROM KpisLov
-            WHERE Id = %s AND DeletedAt IS NULL
+            SELECT "Id", "KpiName", "KpiGroup", "KpiType", "Outcome",
+                   "TargetHigh", "TargetMedium", "TargetLow", "Frequency", "SeverityId"
+            FROM "KpisLov"
+            WHERE "Id" = %s AND "DeletedAt" IS NULL
         """, (request.kpiId,))
         kpi = cursor.fetchone()
 
@@ -212,10 +213,10 @@ def manual_kpi_check(request: ManualCheckRequest):
 
         # Validate asset exists
         cursor.execute("""
-            SELECT a.*, cl.Name as CitizenImpactLevel
-            FROM Assets a
-            LEFT JOIN CommonLookup cl ON a.CitizenImpactLevelId = cl.Id
-            WHERE a.Id = %s AND a.DeletedAt IS NULL
+            SELECT a.*, cl."Name" as "CitizenImpactLevel"
+            FROM "Assets" a
+            LEFT JOIN "CommonLookup" cl ON a."CitizenImpactLevelId" = cl."Id"
+            WHERE a."Id" = %s AND a."DeletedAt" IS NULL
         """, (request.assetId,))
         asset = cursor.fetchone()
 
@@ -264,11 +265,11 @@ def _run_manual_kpi_check(asset, kpi):
         log(f"[MANUAL] Triggered: {kpi['KpiName']} for {asset['AssetName']} (Asset {asset['Id']}) | URL: {asset['AssetUrl']}")
 
         conn = get_db_connection()
-        cursor = conn.cursor(dictionary=True)
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
 
         # Get incident creation frequency
         cursor.execute("""
-            SELECT Name FROM CommonLookup WHERE Type = 'IncidentCreationFrequency' LIMIT 1
+            SELECT "Name" FROM "CommonLookup" WHERE "Type" = 'IncidentCreationFrequency' LIMIT 1
         """)
         freq_row = cursor.fetchone()
         incident_frequency = int(freq_row['Name']) if freq_row else 3

@@ -33,7 +33,8 @@ from src.kpi_runners.browser_runner import BrowserKPIRunner, SharedBrowserContex
 from src.kpi_runners.ssl_runner import SSLKPIRunner
 from src.kpi_runners.dns_runner import DNSKPIRunner
 from src.kpi_runners.accessiblity_runner import AccessibilityKPIRunner
-import mysql.connector
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import certifi
 import requests
 from datetime import datetime
@@ -51,9 +52,10 @@ os.environ['SSL_CERT_FILE'] = certifi.where()
 
 DB_CONFIG = {
     "host": os.getenv("DB_HOST", "localhost"),
-    "user": os.getenv("DB_USER", "root"),
+    "port": int(os.getenv("DB_PORT", "5432")),
+    "user": os.getenv("DB_USER", "postgres"),
     "password": os.getenv("DB_PASS", ""),
-    "database": os.getenv("DB_NAME", "kpi_monitoring")
+    "dbname": os.getenv("DB_NAME", "kpi_monitoring")
 }
 
 # Logging configuration
@@ -294,7 +296,7 @@ def run_parallel_and_log_in_order(assets, worker_fn, worker_args):
 
 def get_db_connection():
     """Get a new database connection"""
-    return mysql.connector.connect(**DB_CONFIG)
+    return psycopg2.connect(**DB_CONFIG)
 
 def get_runner(kpi_type, asset, kpi):
     """Get the appropriate KPI runner based on type"""
@@ -374,10 +376,10 @@ def check_consecutive_hits(cursor, asset_id, kpi_id, required_frequency):
     """Check if KPI has passed consecutively for the required number of times"""
     try:
         cursor.execute("""
-            SELECT Target
-            FROM KPIsResultHistories
-            WHERE AssetId = %s AND KpiId = %s
-            ORDER BY CreatedAt DESC
+            SELECT "Target"
+            FROM "KPIsResultHistories"
+            WHERE "AssetId" = %s AND "KpiId" = %s
+            ORDER BY "CreatedAt" DESC
             LIMIT %s
         """, (asset_id, kpi_id, required_frequency))
 
@@ -395,10 +397,10 @@ def auto_close_incident(cursor, asset_id, kpi_id):
     """Auto-close incidents when a KPI check passes (only for auto-type incidents)"""
     try:
         cursor.execute("""
-            SELECT Id, AssetId, KpiId, IncidentTitle, Description,
-                   Type, SeverityId, AssignedTo
-            FROM Incidents
-            WHERE AssetId = %s AND KpiId = %s AND StatusId = 8 AND Type = 'auto'
+            SELECT "Id", "AssetId", "KpiId", "IncidentTitle", "Description",
+                   "Type", "SeverityId", "AssignedTo"
+            FROM "Incidents"
+            WHERE "AssetId" = %s AND "KpiId" = %s AND "StatusId" = 8 AND "Type" = 'auto'
         """, (asset_id, kpi_id))
 
         incidents = cursor.fetchall()
@@ -407,22 +409,22 @@ def auto_close_incident(cursor, asset_id, kpi_id):
 
         for incident in incidents:
             cursor.execute("""
-                UPDATE Incidents
-                SET StatusId = 12, UpdatedAt = NOW(), UpdatedBy = 'system'
-                WHERE Id = %s
+                UPDATE "Incidents"
+                SET "StatusId" = 12, "UpdatedAt" = NOW(), "UpdatedBy" = 'system'
+                WHERE "Id" = %s
             """, (incident['Id'],))
 
             # Insert into IncidentHistories (audit trail)
             cursor.execute("""
-                INSERT INTO IncidentHistories (AssetId, IncidentId, KpiId, IncidentTitle, Description,
-                                                Type, SeverityId, StatusId, AssignedTo, CreatedBy, CreatedAt)
+                INSERT INTO "IncidentHistories" ("AssetId", "IncidentId", "KpiId", "IncidentTitle", "Description",
+                                                  "Type", "SeverityId", "StatusId", "AssignedTo", "CreatedBy", "CreatedAt")
                 VALUES (%s, %s, %s, %s, %s, %s, %s, 12, %s, 'System Generated', NOW())
             """, (incident['AssetId'], incident['Id'], incident['KpiId'], incident['IncidentTitle'],
                   incident['Description'], incident['Type'], incident['SeverityId'], incident['AssignedTo']))
 
             # Insert into IncidentComments
             cursor.execute("""
-                INSERT INTO IncidentComments (IncidentId, Comment, Status, CreatedBy, CreatedAt)
+                INSERT INTO "IncidentComments" ("IncidentId", "Comment", "Status", "CreatedBy", "CreatedAt")
                 VALUES (%s, 'Auto Generated Incident', 'RESOLVED', 'pda', NOW())
             """, (incident['Id'],))
 
@@ -446,10 +448,12 @@ def store_in_results_history(cursor, asset_id, kpis_result_id, kpi_id, target, r
             return None
 
         cursor.execute("""
-            INSERT INTO KPIsResultHistories (AssetId, KPIsResultId, KpiId, Details, CreatedAt, Target, Result)
+            INSERT INTO "KPIsResultHistories" ("AssetId", "KPIsResultId", "KpiId", "Details", "CreatedAt", "Target", "Result")
             VALUES (%s, %s, %s, %s, NOW(), %s, %s)
+            RETURNING "Id"
         """, (asset_id, kpis_result_id, kpi_id, details, target, result_value))
-        return cursor.lastrowid
+        row = cursor.fetchone()
+        return row['Id'] if row else None
     except Exception as e:
         log(f"[ERROR] Storing in history: {str(e)}", "error")
         return None
@@ -458,10 +462,10 @@ def check_consecutive_failures(cursor, asset_id, kpi_id, required_frequency):
     """Check if KPI has failed consecutively for the required number of times"""
     try:
         cursor.execute("""
-            SELECT Target
-            FROM KPIsResultHistories
-            WHERE AssetId = %s AND KpiId = %s
-            ORDER BY CreatedAt DESC
+            SELECT "Target"
+            FROM "KPIsResultHistories"
+            WHERE "AssetId" = %s AND "KpiId" = %s
+            ORDER BY "CreatedAt" DESC
             LIMIT %s
         """, (asset_id, kpi_id, required_frequency))
 
@@ -479,8 +483,8 @@ def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
     """Create an incident when a KPI check fails"""
     try:
         cursor.execute("""
-            SELECT Id FROM Incidents
-            WHERE AssetId = %s AND KpiId = %s AND StatusId = 8
+            SELECT "Id" FROM "Incidents"
+            WHERE "AssetId" = %s AND "KpiId" = %s AND "StatusId" = 8
             LIMIT 1
         """, (asset_id, kpi_id))
 
@@ -493,23 +497,24 @@ def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
         description = f"{kpi_name} - Auto Created Incident"
 
         cursor.execute("""
-            INSERT INTO Incidents (AssetId, KpiId, IncidentTitle, Description,
-                                   Type, SeverityId, StatusId, AssignedTo, CreatedBy, CreatedAt)
+            INSERT INTO "Incidents" ("AssetId", "KpiId", "IncidentTitle", "Description",
+                                     "Type", "SeverityId", "StatusId", "AssignedTo", "CreatedBy", "CreatedAt")
             VALUES (%s, %s, %s, %s, 'auto', %s, 8, 'pda@dams.com', 'System Generated', NOW())
+            RETURNING "Id"
         """, (asset_id, kpi_id, incident_title, description, severity_id))
 
-        incident_id = cursor.lastrowid
+        incident_id = cursor.fetchone()['Id']
 
         # Insert into IncidentHistories (audit trail)
         cursor.execute("""
-            INSERT INTO IncidentHistories (AssetId, IncidentId, KpiId, IncidentTitle, Description,
-                                            Type, SeverityId, StatusId, AssignedTo, CreatedBy, CreatedAt)
+            INSERT INTO "IncidentHistories" ("AssetId", "IncidentId", "KpiId", "IncidentTitle", "Description",
+                                              "Type", "SeverityId", "StatusId", "AssignedTo", "CreatedBy", "CreatedAt")
             VALUES (%s, %s, %s, %s, %s, 'auto', %s, 8, 'pda@dams.com', 'System Generated', NOW())
         """, (asset_id, incident_id, kpi_id, incident_title, description, severity_id))
 
         # Insert into IncidentComments
         cursor.execute("""
-            INSERT INTO IncidentComments (IncidentId, Comment, Status, CreatedBy, CreatedAt)
+            INSERT INTO "IncidentComments" ("IncidentId", "Comment", "Status", "CreatedBy", "CreatedAt")
             VALUES (%s, 'Auto Generated Incident', 'OPEN', 'pda', NOW())
         """, (incident_id,))
 
@@ -537,17 +542,18 @@ def store_result(cursor, asset_id, kpi_id, result, outcome_type, target_value=No
             )
 
         cursor.execute("""
-            INSERT INTO kpisResults (AssetId, KpiId, Result, Details, CreatedAt, UpdatedAt, Target)
+            INSERT INTO "kpisResults" ("AssetId", "KpiId", "Result", "Details", "CreatedAt", "UpdatedAt", "Target")
             VALUES (%s, %s, %s, %s, NOW(), NOW(), %s)
-            ON DUPLICATE KEY UPDATE
-                Result = VALUES(Result),
-                Details = VALUES(Details),
-                UpdatedAt = NOW(),
-                Target = VALUES(Target),
-                Id = LAST_INSERT_ID(Id)
+            ON CONFLICT ("AssetId", "KpiId") DO UPDATE SET
+                "Result" = EXCLUDED."Result",
+                "Details" = EXCLUDED."Details",
+                "UpdatedAt" = NOW(),
+                "Target" = EXCLUDED."Target"
+            RETURNING "Id"
         """, (asset_id, kpi_id, result_value, details, target))
 
-        return cursor.lastrowid
+        row = cursor.fetchone()
+        return row['Id'] if row else None
     except Exception as e:
         log(f"[ERROR] Storing result: {str(e)}", "error")
         return None
@@ -570,22 +576,22 @@ def recalculate_asset_metrics(cursor, asset_id, citizen_impact_level):
         # 1. Load weight configuration from MetricWeights
         # ----------------------------------------------------------
         chm_weights = {}
-        cursor.execute("SELECT Name, Weight FROM MetricWeights WHERE Category = 'CHM'")
+        cursor.execute("""SELECT "Name", "Weight" FROM "MetricWeights" WHERE "Category" = 'CHM'""")
         for row in cursor.fetchall():
             chm_weights[row['Name']] = float(row['Weight'])
 
         ocm_weights = {}
-        cursor.execute("SELECT Name, Weight FROM MetricWeights WHERE Category = 'OCM'")
+        cursor.execute("""SELECT "Name", "Weight" FROM "MetricWeights" WHERE "Category" = 'OCM'""")
         for row in cursor.fetchall():
             ocm_weights[row['Name']] = float(row['Weight'])
 
         drei_weights = {}
-        cursor.execute("SELECT Name, Weight FROM MetricWeights WHERE Category = 'DREI'")
+        cursor.execute("""SELECT "Name", "Weight" FROM "MetricWeights" WHERE "Category" = 'DREI'""")
         for row in cursor.fetchall():
             drei_weights[row['Name']] = float(row['Weight'])
 
         criticality_map = {}
-        cursor.execute("SELECT Name, Weight FROM MetricWeights WHERE Category = 'AssetCriticality'")
+        cursor.execute("""SELECT "Name", "Weight" FROM "MetricWeights" WHERE "Category" = 'AssetCriticality'""")
         for row in cursor.fetchall():
             criticality_map[row['Name'].upper()] = float(row['Weight'])
 
@@ -594,17 +600,17 @@ def recalculate_asset_metrics(cursor, asset_id, citizen_impact_level):
         # ----------------------------------------------------------
         # Get all automated KPIs with their group and weight
         cursor.execute("""
-            SELECT Id, KpiName, KpiGroup, Weight
-            FROM KpisLov
-            WHERE `Manual` = 'Auto' AND DeletedAt IS NULL AND KpiType IS NOT NULL
+            SELECT "Id", "KpiName", "KpiGroup", "Weight"
+            FROM "KpisLov"
+            WHERE "Manual" = 'Auto' AND "DeletedAt" IS NULL AND "KpiType" IS NOT NULL
         """)
         all_kpis = cursor.fetchall()
 
         # Get last 30 days of results for this asset
         cursor.execute("""
-            SELECT KpiId, Target
-            FROM KPIsResultHistories
-            WHERE AssetId = %s AND CreatedAt >= %s AND Target IN ('hit', 'miss')
+            SELECT "KpiId", "Target"
+            FROM "KPIsResultHistories"
+            WHERE "AssetId" = %s AND "CreatedAt" >= %s AND "Target" IN ('hit', 'miss')
         """, (asset_id, period_start))
         history_rows = cursor.fetchall()
 
@@ -676,16 +682,16 @@ def recalculate_asset_metrics(cursor, asset_id, citizen_impact_level):
         # ----------------------------------------------------------
         # Get severity names for mapping
         severity_map = {}  # {severity_id: severity_name}
-        cursor.execute("SELECT Id, Name FROM CommonLookup WHERE Type = 'SeverityLevel'")
+        cursor.execute("""SELECT "Id", "Name" FROM "CommonLookup" WHERE "Type" = 'SeverityLevel'""")
         for row in cursor.fetchall():
             severity_map[row['Id']] = row['Name']
 
         # Count incidents by severity (all time for this asset)
         cursor.execute("""
-            SELECT SeverityId, StatusId, COUNT(*) as cnt
-            FROM Incidents
-            WHERE AssetId = %s AND DeletedAt IS NULL
-            GROUP BY SeverityId, StatusId
+            SELECT "SeverityId", "StatusId", COUNT(*) as cnt
+            FROM "Incidents"
+            WHERE "AssetId" = %s AND "DeletedAt" IS NULL
+            GROUP BY "SeverityId", "StatusId"
         """, (asset_id,))
 
         incident_counts = {}  # {'P1': {'open': 0, 'total': 0}, ...}
@@ -736,26 +742,26 @@ def recalculate_asset_metrics(cursor, asset_id, citizen_impact_level):
         # 7. UPSERT into AssetMetrics
         # ----------------------------------------------------------
         cursor.execute("""
-            INSERT INTO AssetMetrics (AssetId, AccessibilityIndex, AvailabilityIndex, NavigationIndex,
-                                      PerformanceIndex, SecurityIndex, UserExperienceIndex,
-                                      CitizenHappinessMetric, OverallComplianceMetric,
-                                      DigitalRiskExposureIndex, CurrentHealth,
-                                      PeriodStartDate, PeriodEndDate, CalculatedAt)
+            INSERT INTO "AssetMetrics" ("AssetId", "AccessibilityIndex", "AvailabilityIndex", "NavigationIndex",
+                                        "PerformanceIndex", "SecurityIndex", "UserExperienceIndex",
+                                        "CitizenHappinessMetric", "OverallComplianceMetric",
+                                        "DigitalRiskExposureIndex", "CurrentHealth",
+                                        "PeriodStartDate", "PeriodEndDate", "CalculatedAt")
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-            ON DUPLICATE KEY UPDATE
-                AccessibilityIndex = VALUES(AccessibilityIndex),
-                AvailabilityIndex = VALUES(AvailabilityIndex),
-                NavigationIndex = VALUES(NavigationIndex),
-                PerformanceIndex = VALUES(PerformanceIndex),
-                SecurityIndex = VALUES(SecurityIndex),
-                UserExperienceIndex = VALUES(UserExperienceIndex),
-                CitizenHappinessMetric = VALUES(CitizenHappinessMetric),
-                OverallComplianceMetric = VALUES(OverallComplianceMetric),
-                DigitalRiskExposureIndex = VALUES(DigitalRiskExposureIndex),
-                CurrentHealth = VALUES(CurrentHealth),
-                PeriodStartDate = VALUES(PeriodStartDate),
-                PeriodEndDate = VALUES(PeriodEndDate),
-                CalculatedAt = NOW()
+            ON CONFLICT ("AssetId") DO UPDATE SET
+                "AccessibilityIndex" = EXCLUDED."AccessibilityIndex",
+                "AvailabilityIndex" = EXCLUDED."AvailabilityIndex",
+                "NavigationIndex" = EXCLUDED."NavigationIndex",
+                "PerformanceIndex" = EXCLUDED."PerformanceIndex",
+                "SecurityIndex" = EXCLUDED."SecurityIndex",
+                "UserExperienceIndex" = EXCLUDED."UserExperienceIndex",
+                "CitizenHappinessMetric" = EXCLUDED."CitizenHappinessMetric",
+                "OverallComplianceMetric" = EXCLUDED."OverallComplianceMetric",
+                "DigitalRiskExposureIndex" = EXCLUDED."DigitalRiskExposureIndex",
+                "CurrentHealth" = EXCLUDED."CurrentHealth",
+                "PeriodStartDate" = EXCLUDED."PeriodStartDate",
+                "PeriodEndDate" = EXCLUDED."PeriodEndDate",
+                "CalculatedAt" = NOW()
         """, (asset_id, accessibility_idx, availability_idx, navigation_idx,
               performance_idx, security_idx, ux_idx,
               chm, ocm, drei, current_health,
@@ -934,7 +940,7 @@ def process_single_asset_1min(asset, kpis, incident_freq):
     counts = {'checks': 0, 'hits': 0, 'misses': 0, 'skipped': 0}
     _thread_local.log_buffer = []
     conn = get_thread_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
 
     try:
         log(f"Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'}) | URL: {asset['AssetUrl']}")
@@ -999,7 +1005,7 @@ def run_1min_kpis():
     """Run 1-min frequency KPIs in parallel across all assets.
     No pre-check needed - KPI 1 (completely down) determines if site is down."""
     conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
 
     log("=" * 80)
     log("Running KPIs with frequency: 1 min")
@@ -1007,28 +1013,28 @@ def run_1min_kpis():
 
     try:
         cursor.execute("""
-            SELECT Name FROM CommonLookup WHERE Type = 'IncidentCreationFrequency' LIMIT 1
+            SELECT "Name" FROM "CommonLookup" WHERE "Type" = 'IncidentCreationFrequency' LIMIT 1
         """)
         freq_row = cursor.fetchone()
         incident_frequency = int(freq_row['Name']) if freq_row else 3
 
         cursor.execute("""
-            SELECT a.*, m.MinistryName, d.DepartmentName,
-                   cl.Name as CitizenImpactLevel
-            FROM Assets a
-            LEFT JOIN Ministries m ON a.MinistryId = m.Id
-            LEFT JOIN Departments d ON a.DepartmentId = d.Id
-            LEFT JOIN CommonLookup cl ON a.CitizenImpactLevelId = cl.Id
-            WHERE a.DeletedAt IS NULL
+            SELECT a.*, m."MinistryName", d."DepartmentName",
+                   cl."Name" as "CitizenImpactLevel"
+            FROM "Assets" a
+            LEFT JOIN "Ministries" m ON a."MinistryId" = m."Id"
+            LEFT JOIN "Departments" d ON a."DepartmentId" = d."Id"
+            LEFT JOIN "CommonLookup" cl ON a."CitizenImpactLevelId" = cl."Id"
+            WHERE a."DeletedAt" IS NULL
         """)
         assets = cursor.fetchall()
 
         cursor.execute("""
-            SELECT Id, KpiName, KpiGroup, KpiType, Outcome,
-                   TargetHigh, TargetMedium, TargetLow, Frequency, SeverityId
-            FROM KpisLov
-            WHERE KpiType IS NOT NULL AND Frequency = '1 min'
-                  AND `Manual` = 'Auto' AND DeletedAt IS NULL
+            SELECT "Id", "KpiName", "KpiGroup", "KpiType", "Outcome",
+                   "TargetHigh", "TargetMedium", "TargetLow", "Frequency", "SeverityId"
+            FROM "KpisLov"
+            WHERE "KpiType" IS NOT NULL AND "Frequency" = '1 min'
+                  AND "Manual" = 'Auto' AND "DeletedAt" IS NULL
         """)
         kpis = cursor.fetchall()
 
@@ -1055,7 +1061,7 @@ def process_single_asset_5min(asset, kpis, incident_freq):
     counts = {'checks': 0, 'hits': 0, 'misses': 0, 'skipped': 0}
     _thread_local.log_buffer = []
     conn = get_thread_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
 
     try:
         log(f"Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'}) | URL: {asset['AssetUrl']}")
@@ -1139,7 +1145,7 @@ def run_5min_kpis():
     """Run 5-min frequency KPIs in parallel across all assets.
     Uses pre-check to skip down sites."""
     conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
 
     log("=" * 80)
     log("Running KPIs with frequency: 5 min")
@@ -1147,28 +1153,28 @@ def run_5min_kpis():
 
     try:
         cursor.execute("""
-            SELECT Name FROM CommonLookup WHERE Type = 'IncidentCreationFrequency' LIMIT 1
+            SELECT "Name" FROM "CommonLookup" WHERE "Type" = 'IncidentCreationFrequency' LIMIT 1
         """)
         freq_row = cursor.fetchone()
         incident_frequency = int(freq_row['Name']) if freq_row else 3
 
         cursor.execute("""
-            SELECT a.*, m.MinistryName, d.DepartmentName,
-                   cl.Name as CitizenImpactLevel
-            FROM Assets a
-            LEFT JOIN Ministries m ON a.MinistryId = m.Id
-            LEFT JOIN Departments d ON a.DepartmentId = d.Id
-            LEFT JOIN CommonLookup cl ON a.CitizenImpactLevelId = cl.Id
-            WHERE a.DeletedAt IS NULL
+            SELECT a.*, m."MinistryName", d."DepartmentName",
+                   cl."Name" as "CitizenImpactLevel"
+            FROM "Assets" a
+            LEFT JOIN "Ministries" m ON a."MinistryId" = m."Id"
+            LEFT JOIN "Departments" d ON a."DepartmentId" = d."Id"
+            LEFT JOIN "CommonLookup" cl ON a."CitizenImpactLevelId" = cl."Id"
+            WHERE a."DeletedAt" IS NULL
         """)
         assets = cursor.fetchall()
 
         cursor.execute("""
-            SELECT Id, KpiName, KpiGroup, KpiType, Outcome,
-                   TargetHigh, TargetMedium, TargetLow, Frequency, SeverityId
-            FROM KpisLov
-            WHERE KpiType IS NOT NULL AND Frequency = '5 min'
-                  AND `Manual` = 'Auto' AND DeletedAt IS NULL
+            SELECT "Id", "KpiName", "KpiGroup", "KpiType", "Outcome",
+                   "TargetHigh", "TargetMedium", "TargetLow", "Frequency", "SeverityId"
+            FROM "KpisLov"
+            WHERE "KpiType" IS NOT NULL AND "Frequency" = '5 min'
+                  AND "Manual" = 'Auto' AND "DeletedAt" IS NULL
         """)
         kpis = cursor.fetchall()
 
@@ -1196,7 +1202,7 @@ def process_single_asset_15min(asset, non_browser_kpis, browser_kpis, incident_f
     counts = {'checks': 0, 'hits': 0, 'misses': 0, 'skipped': 0}
     _thread_local.log_buffer = []
     conn = get_thread_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
 
     try:
         log(f"Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'}) | URL: {asset['AssetUrl']}")
@@ -1320,7 +1326,7 @@ def run_15min_kpis():
     """Run 15-min frequency KPIs in parallel across all assets.
     Uses pre-check to skip down sites. Browser KPIs use SharedBrowserContext per worker."""
     conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
 
     log("=" * 80)
     log("Running KPIs with frequency: 15 min")
@@ -1328,28 +1334,28 @@ def run_15min_kpis():
 
     try:
         cursor.execute("""
-            SELECT Name FROM CommonLookup WHERE Type = 'IncidentCreationFrequency' LIMIT 1
+            SELECT "Name" FROM "CommonLookup" WHERE "Type" = 'IncidentCreationFrequency' LIMIT 1
         """)
         freq_row = cursor.fetchone()
         incident_frequency = int(freq_row['Name']) if freq_row else 3
 
         cursor.execute("""
-            SELECT a.*, m.MinistryName, d.DepartmentName,
-                   cl.Name as CitizenImpactLevel
-            FROM Assets a
-            LEFT JOIN Ministries m ON a.MinistryId = m.Id
-            LEFT JOIN Departments d ON a.DepartmentId = d.Id
-            LEFT JOIN CommonLookup cl ON a.CitizenImpactLevelId = cl.Id
-            WHERE a.DeletedAt IS NULL
+            SELECT a.*, m."MinistryName", d."DepartmentName",
+                   cl."Name" as "CitizenImpactLevel"
+            FROM "Assets" a
+            LEFT JOIN "Ministries" m ON a."MinistryId" = m."Id"
+            LEFT JOIN "Departments" d ON a."DepartmentId" = d."Id"
+            LEFT JOIN "CommonLookup" cl ON a."CitizenImpactLevelId" = cl."Id"
+            WHERE a."DeletedAt" IS NULL
         """)
         assets = cursor.fetchall()
 
         cursor.execute("""
-            SELECT Id, KpiName, KpiGroup, KpiType, Outcome,
-                   TargetHigh, TargetMedium, TargetLow, Frequency, SeverityId
-            FROM KpisLov
-            WHERE KpiType IS NOT NULL AND Frequency = '15 min'
-                  AND `Manual` = 'Auto' AND DeletedAt IS NULL
+            SELECT "Id", "KpiName", "KpiGroup", "KpiType", "Outcome",
+                   "TargetHigh", "TargetMedium", "TargetLow", "Frequency", "SeverityId"
+            FROM "KpisLov"
+            WHERE "KpiType" IS NOT NULL AND "Frequency" = '15 min'
+                  AND "Manual" = 'Auto' AND "DeletedAt" IS NULL
         """)
         kpis = cursor.fetchall()
 
@@ -1376,7 +1382,7 @@ def run_15min_kpis():
 def run_kpis_by_frequency(frequency_filter):
     """Run all KPIs that match the given frequency"""
     conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
 
     log("=" * 80)
     log(f"Running KPIs with frequency: {frequency_filter}")
@@ -1385,30 +1391,30 @@ def run_kpis_by_frequency(frequency_filter):
     try:
         # Get global IncidentCreationFrequency from CommonLookup
         cursor.execute("""
-            SELECT Name FROM CommonLookup WHERE Type = 'IncidentCreationFrequency' LIMIT 1
+            SELECT "Name" FROM "CommonLookup" WHERE "Type" = 'IncidentCreationFrequency' LIMIT 1
         """)
         freq_row = cursor.fetchone()
         incident_frequency = int(freq_row['Name']) if freq_row else 3
 
         # Get all active assets
         cursor.execute("""
-            SELECT a.*, m.MinistryName, d.DepartmentName,
-                   cl.Name as CitizenImpactLevel
-            FROM Assets a
-            LEFT JOIN Ministries m ON a.MinistryId = m.Id
-            LEFT JOIN Departments d ON a.DepartmentId = d.Id
-            LEFT JOIN CommonLookup cl ON a.CitizenImpactLevelId = cl.Id
-            WHERE a.DeletedAt IS NULL
+            SELECT a.*, m."MinistryName", d."DepartmentName",
+                   cl."Name" as "CitizenImpactLevel"
+            FROM "Assets" a
+            LEFT JOIN "Ministries" m ON a."MinistryId" = m."Id"
+            LEFT JOIN "Departments" d ON a."DepartmentId" = d."Id"
+            LEFT JOIN "CommonLookup" cl ON a."CitizenImpactLevelId" = cl."Id"
+            WHERE a."DeletedAt" IS NULL
         """)
         assets = cursor.fetchall()
 
         # Get KPIs matching the frequency (only automated, include SeverityId)
         cursor.execute("""
-            SELECT Id, KpiName, KpiGroup, KpiType, Outcome,
-                   TargetHigh, TargetMedium, TargetLow, Frequency, SeverityId
-            FROM KpisLov
-            WHERE KpiType IS NOT NULL AND Frequency = %s
-                  AND `Manual` = 'Auto' AND DeletedAt IS NULL
+            SELECT "Id", "KpiName", "KpiGroup", "KpiType", "Outcome",
+                   "TargetHigh", "TargetMedium", "TargetLow", "Frequency", "SeverityId"
+            FROM "KpisLov"
+            WHERE "KpiType" IS NOT NULL AND "Frequency" = %s
+                  AND "Manual" = 'Auto' AND "DeletedAt" IS NULL
         """, (frequency_filter,))
         kpis = cursor.fetchall()
 
@@ -1572,8 +1578,8 @@ _thread_local = threading.local()
 
 def get_thread_db_connection():
     """Get a database connection for the current thread"""
-    if not hasattr(_thread_local, 'connection') or not _thread_local.connection.is_connected():
-        _thread_local.connection = mysql.connector.connect(**DB_CONFIG)
+    if not hasattr(_thread_local, 'connection') or _thread_local.connection.closed:
+        _thread_local.connection = psycopg2.connect(**DB_CONFIG)
     return _thread_local.connection
 
 def process_single_asset_daily(asset, non_browser_kpis, browser_kpis, incident_freq):
@@ -1583,7 +1589,7 @@ def process_single_asset_daily(asset, non_browser_kpis, browser_kpis, incident_f
     counts = {'checks': 0, 'hits': 0, 'misses': 0, 'skipped': 0}
     _thread_local.log_buffer = []
     conn = get_thread_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
 
     try:
         log(f"Asset: {asset['AssetName']} ({asset['CitizenImpactLevel'] or 'N/A'}) | URL: {asset['AssetUrl']}")
@@ -1707,7 +1713,7 @@ def run_daily_kpis_parallel():
     """Run daily KPIs in parallel across all assets.
     Uses pre-check to skip down sites. Browser KPIs use SharedBrowserContext per worker."""
     conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
 
     log("=" * 80)
     log(f"Running Daily KPIs (PARALLEL MODE - {PARALLEL_WORKERS} workers)")
@@ -1715,28 +1721,28 @@ def run_daily_kpis_parallel():
 
     try:
         cursor.execute("""
-            SELECT Name FROM CommonLookup WHERE Type = 'IncidentCreationFrequency' LIMIT 1
+            SELECT "Name" FROM "CommonLookup" WHERE "Type" = 'IncidentCreationFrequency' LIMIT 1
         """)
         freq_row = cursor.fetchone()
         incident_frequency = int(freq_row['Name']) if freq_row else 3
 
         cursor.execute("""
-            SELECT a.*, m.MinistryName, d.DepartmentName,
-                   cl.Name as CitizenImpactLevel
-            FROM Assets a
-            LEFT JOIN Ministries m ON a.MinistryId = m.Id
-            LEFT JOIN Departments d ON a.DepartmentId = d.Id
-            LEFT JOIN CommonLookup cl ON a.CitizenImpactLevelId = cl.Id
-            WHERE a.DeletedAt IS NULL
+            SELECT a.*, m."MinistryName", d."DepartmentName",
+                   cl."Name" as "CitizenImpactLevel"
+            FROM "Assets" a
+            LEFT JOIN "Ministries" m ON a."MinistryId" = m."Id"
+            LEFT JOIN "Departments" d ON a."DepartmentId" = d."Id"
+            LEFT JOIN "CommonLookup" cl ON a."CitizenImpactLevelId" = cl."Id"
+            WHERE a."DeletedAt" IS NULL
         """)
         assets = cursor.fetchall()
 
         cursor.execute("""
-            SELECT Id, KpiName, KpiGroup, KpiType, Outcome,
-                   TargetHigh, TargetMedium, TargetLow, Frequency, SeverityId
-            FROM KpisLov
-            WHERE KpiType IS NOT NULL AND Frequency = 'Daily'
-                  AND `Manual` = 'Auto' AND DeletedAt IS NULL
+            SELECT "Id", "KpiName", "KpiGroup", "KpiType", "Outcome",
+                   "TargetHigh", "TargetMedium", "TargetLow", "Frequency", "SeverityId"
+            FROM "KpisLov"
+            WHERE "KpiType" IS NOT NULL AND "Frequency" = 'Daily'
+                  AND "Manual" = 'Auto' AND "DeletedAt" IS NULL
         """)
         kpis = cursor.fetchall()
 
