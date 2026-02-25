@@ -480,11 +480,16 @@ def check_consecutive_failures(cursor, asset_id, kpi_id, required_frequency):
         return False
 
 def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
-    """Create an incident when a KPI check fails"""
+    """Create an incident when a KPI check fails.
+    Uses INSERT ON CONFLICT to prevent duplicate open incidents even under
+    concurrent execution (auto-scheduler + manual trigger race condition).
+    Requires unique partial index: unique_open_incident_per_asset_kpi.
+    """
     try:
+        # Check for existing open incident first (fast path)
         cursor.execute("""
             SELECT "Id" FROM "Incidents"
-            WHERE "AssetId" = %s AND "KpiId" = %s AND "StatusId" = 8
+            WHERE "AssetId" = %s AND "KpiId" = %s AND "StatusId" = 8 AND "DeletedAt" IS NULL
             LIMIT 1
         """, (asset_id, kpi_id))
 
@@ -496,14 +501,33 @@ def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
         incident_title = f"{kpi_name} - Breach"
         description = f"{kpi_name} - Auto Created Incident"
 
+        # Race-safe insert: ON CONFLICT DO NOTHING prevents duplicate if another
+        # thread inserted between our SELECT and this INSERT
         cursor.execute("""
             INSERT INTO "Incidents" ("AssetId", "KpiId", "IncidentTitle", "Description",
-                                     "Type", "SeverityId", "StatusId", "AssignedTo", "CreatedBy", "CreatedAt")
-            VALUES (%s, %s, %s, %s, 'auto', %s, 8, 'pda@dams.com', 'System Generated', NOW())
+                                     "Type", "SeverityId", "StatusId", "AssignedTo", "CreatedBy", "CreatedAt",
+                                     "DeletedAt")
+            VALUES (%s, %s, %s, %s, 'auto', %s, 8, 'pda@dams.com', 'System Generated', NOW(), NULL)
+            ON CONFLICT ("AssetId", "KpiId") WHERE "StatusId" = 8 AND "DeletedAt" IS NULL
+            DO NOTHING
             RETURNING "Id"
         """, (asset_id, kpi_id, incident_title, description, severity_id))
 
-        incident_id = cursor.fetchone()['Id']
+        row = cursor.fetchone()
+
+        if row is None:
+            # ON CONFLICT triggered — another thread already created it; fetch it
+            cursor.execute("""
+                SELECT "Id" FROM "Incidents"
+                WHERE "AssetId" = %s AND "KpiId" = %s AND "StatusId" = 8 AND "DeletedAt" IS NULL
+                LIMIT 1
+            """, (asset_id, kpi_id))
+            existing = cursor.fetchone()
+            if existing:
+                return existing['Id'], False
+            return None, False
+
+        incident_id = row['Id']
 
         # Insert into IncidentHistories (audit trail)
         cursor.execute("""
