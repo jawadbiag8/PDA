@@ -337,7 +337,7 @@ class ManualCheckAllRequest(BaseModel):
 
 @app.post("/api/kpi/manual-check-all")
 def manual_kpi_check_all(request: ManualCheckAllRequest):
-    """Trigger all KPI checks for a specific asset. Returns immediately."""
+    """Trigger all auto KPI checks for a specific asset. Returns immediately."""
     conn = None
     cursor = None
 
@@ -357,17 +357,17 @@ def manual_kpi_check_all(request: ManualCheckAllRequest):
         if not asset:
             return {"success": False, "message": f"Asset with ID {request.assetId} not found"}
 
-        # Fetch all active KPIs
+        # Fetch all active auto KPIs
         cursor.execute("""
             SELECT "Id", "KpiName", "KpiGroup", "KpiType", "Outcome",
                    "TargetHigh", "TargetMedium", "TargetLow", "Frequency", "SeverityId"
             FROM "KpisLov"
-            WHERE "KpiType" IS NOT NULL AND "DeletedAt" IS NULL
+            WHERE "KpiType" IS NOT NULL AND "Manual" = 'Auto' AND "DeletedAt" IS NULL
         """)
         kpis = cursor.fetchall()
 
         if not kpis:
-            return {"success": False, "message": "No active KPIs found"}
+            return {"success": False, "message": "No active auto KPIs found"}
 
         browser_kpis = [k for k in kpis if k['KpiType'] in ('browser', 'accessibility')]
         non_browser_kpis = [k for k in kpis if k['KpiType'] not in ('browser', 'accessibility')]
@@ -382,17 +382,11 @@ def manual_kpi_check_all(request: ManualCheckAllRequest):
 
         return {
             "success": True,
-            "message": (
-                f"Running {len(kpis)} KPI checks for {asset['AssetName']}. "
-                f"This may take 1-2 minutes. Please check the results shortly."
-            ),
+            "message": "Check all KPIs in progress",
             "data": {
                 "assetId": asset['Id'],
                 "assetName": asset['AssetName'],
-                "assetUrl": asset['AssetUrl'],
                 "totalKpis": len(kpis),
-                "browserKpis": len(browser_kpis),
-                "nonBrowserKpis": len(non_browser_kpis),
             }
         }
 
@@ -409,7 +403,7 @@ def manual_kpi_check_all(request: ManualCheckAllRequest):
 
 
 def _run_manual_all_kpis(asset, non_browser_kpis, browser_kpis):
-    """Background worker: run all KPI checks for a single asset."""
+    """Background worker: run all auto KPI checks for a single asset."""
     conn = None
     cursor = None
 
