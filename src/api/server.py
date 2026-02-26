@@ -192,10 +192,13 @@ class ManualCheckRequest(BaseModel):
 @app.post("/api/kpi/manual-check")
 def manual_kpi_check(request: ManualCheckRequest):
     """Trigger a manual KPI check for a specific asset. Returns immediately."""
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    conn = None
+    cursor = None
 
     try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
         # Validate KPI exists
         cursor.execute("""
             SELECT "Id", "KpiName", "KpiGroup", "KpiType", "Outcome",
@@ -250,10 +253,15 @@ def manual_kpi_check(request: ManualCheckRequest):
         }
 
     except Exception as e:
+        log(f"[MANUAL] [ERROR] manual_kpi_check failed: {str(e)}", "error")
+        import traceback
+        log(f"[MANUAL] [TRACEBACK] {traceback.format_exc()}", "error")
         return {"success": False, "message": f"Error: {str(e)}"}
     finally:
-        cursor.close()
-        conn.close()
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 
 def _run_manual_kpi_check(asset, kpi):
