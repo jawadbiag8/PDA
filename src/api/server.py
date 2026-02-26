@@ -331,6 +331,182 @@ def _run_manual_kpi_check(asset, kpi):
             conn.close()
 
 
+class ManualCheckAllRequest(BaseModel):
+    assetId: int
+
+
+@app.post("/api/kpi/manual-check-all")
+def manual_kpi_check_all(request: ManualCheckAllRequest):
+    """Trigger all KPI checks for a specific asset. Returns immediately."""
+    conn = None
+    cursor = None
+
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Validate asset exists
+        cursor.execute("""
+            SELECT a.*, cl."Name" as "CitizenImpactLevel"
+            FROM "Assets" a
+            LEFT JOIN "CommonLookup" cl ON a."CitizenImpactLevelId" = cl."Id"
+            WHERE a."Id" = %s AND a."DeletedAt" IS NULL
+        """, (request.assetId,))
+        asset = cursor.fetchone()
+
+        if not asset:
+            return {"success": False, "message": f"Asset with ID {request.assetId} not found"}
+
+        # Fetch all active KPIs
+        cursor.execute("""
+            SELECT "Id", "KpiName", "KpiGroup", "KpiType", "Outcome",
+                   "TargetHigh", "TargetMedium", "TargetLow", "Frequency", "SeverityId"
+            FROM "KpisLov"
+            WHERE "KpiType" IS NOT NULL AND "DeletedAt" IS NULL
+        """)
+        kpis = cursor.fetchall()
+
+        if not kpis:
+            return {"success": False, "message": "No active KPIs found"}
+
+        browser_kpis = [k for k in kpis if k['KpiType'] in ('browser', 'accessibility')]
+        non_browser_kpis = [k for k in kpis if k['KpiType'] not in ('browser', 'accessibility')]
+
+        # Spawn background thread
+        thread = threading.Thread(
+            target=_run_manual_all_kpis,
+            args=(asset, non_browser_kpis, browser_kpis),
+            daemon=True
+        )
+        thread.start()
+
+        return {
+            "success": True,
+            "message": (
+                f"Running {len(kpis)} KPI checks for {asset['AssetName']}. "
+                f"This may take 1-2 minutes. Please check the results shortly."
+            ),
+            "data": {
+                "assetId": asset['Id'],
+                "assetName": asset['AssetName'],
+                "assetUrl": asset['AssetUrl'],
+                "totalKpis": len(kpis),
+                "browserKpis": len(browser_kpis),
+                "nonBrowserKpis": len(non_browser_kpis),
+            }
+        }
+
+    except Exception as e:
+        log(f"[MANUAL-ALL] [ERROR] manual_kpi_check_all failed: {str(e)}", "error")
+        import traceback
+        log(f"[MANUAL-ALL] [TRACEBACK] {traceback.format_exc()}", "error")
+        return {"success": False, "message": f"Error: {str(e)}"}
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def _run_manual_all_kpis(asset, non_browser_kpis, browser_kpis):
+    """Background worker: run all KPI checks for a single asset."""
+    conn = None
+    cursor = None
+
+    try:
+        total_kpis = len(non_browser_kpis) + len(browser_kpis)
+        log(f"[MANUAL-ALL] Starting {total_kpis} KPIs for {asset['AssetName']} (Asset {asset['Id']}) | URL: {asset['AssetUrl']}")
+
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+
+        # Get incident creation frequency
+        cursor.execute("""
+            SELECT "Name" FROM "CommonLookup" WHERE "Type" = 'IncidentCreationFrequency' LIMIT 1
+        """)
+        freq_row = cursor.fetchone()
+        incident_frequency = int(freq_row['Name']) if freq_row else 3
+
+        hits = 0
+        misses = 0
+        skipped = 0
+
+        # Run non-browser KPIs first
+        for kpi in non_browser_kpis:
+            try:
+                result = run_kpi_for_asset(cursor, asset, kpi, incident_frequency)
+                if result == "hit":
+                    hits += 1
+                elif result == "miss":
+                    misses += 1
+                else:
+                    skipped += 1
+                log(f"[MANUAL-ALL]   [{result.upper() if result else 'ERR'}] {kpi['KpiName']}")
+            except Exception as e:
+                skipped += 1
+                log(f"[MANUAL-ALL]   [ERROR] {kpi['KpiName']}: {str(e)}", "error")
+
+        conn.commit()
+
+        # Run browser KPIs with shared browser instance
+        if browser_kpis:
+            try:
+                with SharedBrowserContext() as ctx:
+                    page, load_time, nav_success = ctx.navigate_to(asset['AssetUrl'])
+                    if not nav_success:
+                        log(f"[MANUAL-ALL] [WARN] Page load was slow/partial, running checks anyway")
+
+                    for kpi in browser_kpis:
+                        try:
+                            result = run_browser_kpi_with_page(cursor, asset, kpi, incident_frequency, page, load_time)
+                            if result == "hit":
+                                hits += 1
+                            elif result == "miss":
+                                misses += 1
+                            else:
+                                skipped += 1
+                            log(f"[MANUAL-ALL]   [{result.upper() if result else 'ERR'}] {kpi['KpiName']}")
+                        except Exception as e:
+                            skipped += 1
+                            log(f"[MANUAL-ALL]   [ERROR] {kpi['KpiName']}: {str(e)}", "error")
+
+            except Exception as e:
+                log(f"[MANUAL-ALL] [ERROR] Browser context failed: {str(e)}", "error")
+                for kpi in browser_kpis:
+                    skipped += 1
+                    error_result = {'flag': True, 'value': None, 'details': f'Browser error: {str(e)[:200]}'}
+                    result_id = store_result(cursor, asset['Id'], kpi['Id'], error_result, kpi['Outcome'], target_override="skipped")
+                    result_value = format_result_value(error_result, kpi['Outcome'])
+                    store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, f'Browser error: {str(e)[:200]}')
+
+        conn.commit()
+
+        # Recalculate metrics
+        recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
+        conn.commit()
+
+        log(f"[MANUAL-ALL] Completed: {asset['AssetName']} | {hits} hits, {misses} misses, {skipped} skipped")
+
+        # Notify backend
+        _notify_control_panel(asset['Id'])
+        _notify_dashboards()
+
+    except Exception as e:
+        log(f"[MANUAL-ALL] [ERROR] {asset['AssetName']}: {str(e)}", "error")
+        import traceback
+        log(f"[MANUAL-ALL] [TRACEBACK] {traceback.format_exc()}", "error")
+        try:
+            if conn:
+                conn.commit()
+        except:
+            pass
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
 API_PID_FILE = os.path.join(MANUAL_LOG_PATH, "api_server.pid")
 
 
