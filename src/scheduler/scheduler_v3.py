@@ -1008,7 +1008,6 @@ def process_single_asset_1min(asset, kpis, incident_freq):
         conn.commit()
         recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
         conn.commit()
-        notify_control_panel(asset['Id'])
 
     except Exception as e:
         log(f"[ERROR] Asset {asset['AssetName']}: {str(e)}", "error")
@@ -1122,7 +1121,6 @@ def process_single_asset_5min(asset, kpis, incident_freq):
             conn.commit()
             recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
             conn.commit()
-            notify_control_panel(asset['Id'])
             counts['log_buffer'] = _thread_local.log_buffer
             _thread_local.log_buffer = None
             cursor.close()
@@ -1149,7 +1147,6 @@ def process_single_asset_5min(asset, kpis, incident_freq):
         conn.commit()
         recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
         conn.commit()
-        notify_control_panel(asset['Id'])
 
     except Exception as e:
         log(f"[ERROR] Asset {asset['AssetName']}: {str(e)}", "error")
@@ -1265,7 +1262,6 @@ def process_single_asset_15min(asset, non_browser_kpis, browser_kpis, incident_f
             conn.commit()
             recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
             conn.commit()
-            notify_control_panel(asset['Id'])
             counts['log_buffer'] = _thread_local.log_buffer
             _thread_local.log_buffer = None
             cursor.close()
@@ -1331,7 +1327,6 @@ def process_single_asset_15min(asset, non_browser_kpis, browser_kpis, incident_f
         conn.commit()
         recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
         conn.commit()
-        notify_control_panel(asset['Id'])
 
     except Exception as e:
         log(f"[ERROR] Asset {asset['AssetName']}: {str(e)}", "error")
@@ -1504,7 +1499,6 @@ def run_kpis_by_frequency(frequency_filter):
                 conn.commit()
                 recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
                 conn.commit()
-                notify_control_panel(asset['Id'])
                 continue
 
             # Run non-browser KPIs first (they're fast)
@@ -1585,7 +1579,6 @@ def run_kpis_by_frequency(frequency_filter):
             # Recalculate metrics for this asset after all KPIs are done
             recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
             conn.commit()
-            notify_control_panel(asset['Id'])
 
         # Notify dashboards once after all assets are processed
         notify_dashboards()
@@ -1654,7 +1647,6 @@ def process_single_asset_daily(asset, non_browser_kpis, browser_kpis, incident_f
             conn.commit()
             recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
             conn.commit()
-            notify_control_panel(asset['Id'])
             counts['log_buffer'] = _thread_local.log_buffer
             _thread_local.log_buffer = None
             cursor.close()
@@ -1720,7 +1712,6 @@ def process_single_asset_daily(asset, non_browser_kpis, browser_kpis, incident_f
         conn.commit()
         recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
         conn.commit()
-        notify_control_panel(asset['Id'])
 
     except Exception as e:
         log(f"[ERROR] Asset {asset['AssetName']}: {str(e)}", "error")
