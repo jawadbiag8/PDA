@@ -1009,7 +1009,6 @@ def process_single_asset_1min(asset, kpis, incident_freq):
         recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
         conn.commit()
         notify_control_panel(asset['Id'])
-        notify_dashboards()
 
     except Exception as e:
         log(f"[ERROR] Asset {asset['AssetName']}: {str(e)}", "error")
@@ -1070,6 +1069,9 @@ def run_1min_kpis():
 
         totals = run_parallel_and_log_in_order(assets, process_single_asset_1min, (kpis, incident_frequency))
 
+        # Notify dashboards once after all assets are processed
+        notify_dashboards()
+
         log(f"Summary: {totals['checks']} checks | {totals['hits']} hits | {totals['misses']} misses | {totals['skipped']} skipped")
 
     except Exception as e:
@@ -1121,7 +1123,6 @@ def process_single_asset_5min(asset, kpis, incident_freq):
             recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
             conn.commit()
             notify_control_panel(asset['Id'])
-            notify_dashboards()
             counts['log_buffer'] = _thread_local.log_buffer
             _thread_local.log_buffer = None
             cursor.close()
@@ -1149,7 +1150,6 @@ def process_single_asset_5min(asset, kpis, incident_freq):
         recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
         conn.commit()
         notify_control_panel(asset['Id'])
-        notify_dashboards()
 
     except Exception as e:
         log(f"[ERROR] Asset {asset['AssetName']}: {str(e)}", "error")
@@ -1210,6 +1210,9 @@ def run_5min_kpis():
 
         totals = run_parallel_and_log_in_order(assets, process_single_asset_5min, (kpis, incident_frequency))
 
+        # Notify dashboards once after all assets are processed
+        notify_dashboards()
+
         log(f"Summary: {totals['checks']} checks | {totals['hits']} hits | {totals['misses']} misses | {totals['skipped']} skipped")
 
     except Exception as e:
@@ -1263,7 +1266,6 @@ def process_single_asset_15min(asset, non_browser_kpis, browser_kpis, incident_f
             recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
             conn.commit()
             notify_control_panel(asset['Id'])
-            notify_dashboards()
             counts['log_buffer'] = _thread_local.log_buffer
             _thread_local.log_buffer = None
             cursor.close()
@@ -1330,7 +1332,6 @@ def process_single_asset_15min(asset, non_browser_kpis, browser_kpis, incident_f
         recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
         conn.commit()
         notify_control_panel(asset['Id'])
-        notify_dashboards()
 
     except Exception as e:
         log(f"[ERROR] Asset {asset['AssetName']}: {str(e)}", "error")
@@ -1393,6 +1394,9 @@ def run_15min_kpis():
         log(f"Assets: {len(assets)} | KPIs: {len(kpis)} (browser: {len(browser_kpis)}, other: {len(non_browser_kpis)}) | Workers: {PARALLEL_WORKERS}")
 
         totals = run_parallel_and_log_in_order(assets, process_single_asset_15min, (non_browser_kpis, browser_kpis, incident_frequency))
+
+        # Notify dashboards once after all assets are processed
+        notify_dashboards()
 
         log(f"Summary: {totals['checks']} checks | {totals['hits']} hits | {totals['misses']} misses | {totals['skipped']} skipped")
 
@@ -1501,7 +1505,6 @@ def run_kpis_by_frequency(frequency_filter):
                 recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
                 conn.commit()
                 notify_control_panel(asset['Id'])
-                notify_dashboards()
                 continue
 
             # Run non-browser KPIs first (they're fast)
@@ -1583,7 +1586,9 @@ def run_kpis_by_frequency(frequency_filter):
             recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
             conn.commit()
             notify_control_panel(asset['Id'])
-            notify_dashboards()
+
+        # Notify dashboards once after all assets are processed
+        notify_dashboards()
 
         log(f"Summary: {total_checks} checks | {total_hits} hits | {total_misses} misses | {total_skipped} skipped")
 
@@ -1650,7 +1655,6 @@ def process_single_asset_daily(asset, non_browser_kpis, browser_kpis, incident_f
             recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
             conn.commit()
             notify_control_panel(asset['Id'])
-            notify_dashboards()
             counts['log_buffer'] = _thread_local.log_buffer
             _thread_local.log_buffer = None
             cursor.close()
@@ -1717,7 +1721,6 @@ def process_single_asset_daily(asset, non_browser_kpis, browser_kpis, incident_f
         recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
         conn.commit()
         notify_control_panel(asset['Id'])
-        notify_dashboards()
 
     except Exception as e:
         log(f"[ERROR] Asset {asset['AssetName']}: {str(e)}", "error")
@@ -1780,6 +1783,9 @@ def run_daily_kpis_parallel():
         log(f"Assets: {len(assets)} | KPIs: {len(kpis)} (browser: {len(browser_kpis)}, other: {len(non_browser_kpis)}) | Workers: {PARALLEL_WORKERS}")
 
         totals = run_parallel_and_log_in_order(assets, process_single_asset_daily, (non_browser_kpis, browser_kpis, incident_frequency))
+
+        # Notify dashboards once after all assets are processed
+        notify_dashboards()
 
         log(f"Summary: {totals['checks']} checks | {totals['hits']} hits | {totals['misses']} misses | {totals['skipped']} skipped")
 
