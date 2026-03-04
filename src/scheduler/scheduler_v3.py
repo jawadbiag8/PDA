@@ -346,8 +346,13 @@ def format_result_value(result, outcome_type):
     else:
         return str(value) if value is not None else ''
 
-def determine_target_hit_miss(result_value, target_value, outcome_type, runner_flag):
-    """Determine if result is a hit or miss based on target comparison."""
+def determine_target_hit_miss(result_value, target_value, outcome_type, runner_flag, target_high=None, target_low=None):
+    """Determine if result is a hit or miss based on target comparison.
+
+    For '%' outcomes, direction is auto-detected from TargetHigh vs TargetLow:
+      - TargetHigh >= TargetLow → higher is better (e.g. WCAG compliance 95%)
+      - TargetHigh < TargetLow  → lower is better (e.g. missing alt text 2%)
+    """
     if outcome_type == 'Flag':
         return "miss" if runner_flag else "hit"
 
@@ -365,7 +370,19 @@ def determine_target_hit_miss(result_value, target_value, outcome_type, runner_f
         if outcome_type in ['Sec', 'MB']:
             return "hit" if result_num <= target_num else "miss"
         elif outcome_type == '%':
-            return "hit" if result_num >= target_num else "miss"
+            # Auto-detect direction: if TargetHigh < TargetLow, lower is better
+            lower_is_better = False
+            if target_high is not None and target_low is not None:
+                try:
+                    high_num = float(re.sub(r'[^0-9.\-]', '', str(target_high)))
+                    low_num = float(re.sub(r'[^0-9.\-]', '', str(target_low)))
+                    lower_is_better = high_num < low_num
+                except (ValueError, TypeError):
+                    pass
+            if lower_is_better:
+                return "hit" if result_num <= target_num else "miss"
+            else:
+                return "hit" if result_num >= target_num else "miss"
         else:
             return "miss" if runner_flag else "hit"
 
@@ -548,7 +565,7 @@ def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
         log(f"[ERROR] Creating incident: {str(e)}", "error")
         return None, False
 
-def store_result(cursor, asset_id, kpi_id, result, outcome_type, target_value=None, target_override=None):
+def store_result(cursor, asset_id, kpi_id, result, outcome_type, target_value=None, target_override=None, target_high=None, target_low=None):
     """Store KPI result in the database using UPSERT logic. Returns the kpisResults row ID."""
     try:
         result_value = format_result_value(result, outcome_type)
@@ -562,7 +579,9 @@ def store_result(cursor, asset_id, kpi_id, result, outcome_type, target_value=No
                 result.get('value'),
                 target_value,
                 outcome_type,
-                result.get('flag')
+                result.get('flag'),
+                target_high=target_high,
+                target_low=target_low
             )
 
         cursor.execute("""
@@ -836,14 +855,17 @@ def run_kpi_for_asset(cursor, asset, kpi, incident_frequency):
             target_value = kpi.get('TargetMedium')
 
         # Store result (returns kpisResults row ID for history FK)
-        result_id = store_result(cursor, asset['Id'], kpi['Id'], result, outcome_type, target_value)
+        result_id = store_result(cursor, asset['Id'], kpi['Id'], result, outcome_type, target_value,
+                                 target_high=kpi.get('TargetHigh'), target_low=kpi.get('TargetLow'))
 
         # Determine hit/miss
         target = determine_target_hit_miss(
             result.get('value'),
             target_value,
             outcome_type,
-            result.get('flag')
+            result.get('flag'),
+            target_high=kpi.get('TargetHigh'),
+            target_low=kpi.get('TargetLow')
         )
 
         # Store in history
@@ -915,14 +937,17 @@ def run_browser_kpi_with_page(cursor, asset, kpi, incident_frequency, page, load
             target_value = kpi.get('TargetMedium')
 
         # Store result
-        result_id = store_result(cursor, asset['Id'], kpi['Id'], result, outcome_type, target_value)
+        result_id = store_result(cursor, asset['Id'], kpi['Id'], result, outcome_type, target_value,
+                                 target_high=kpi.get('TargetHigh'), target_low=kpi.get('TargetLow'))
 
         # Determine hit/miss
         target = determine_target_hit_miss(
             result.get('value'),
             target_value,
             outcome_type,
-            result.get('flag')
+            result.get('flag'),
+            target_high=kpi.get('TargetHigh'),
+            target_low=kpi.get('TargetLow')
         )
 
         # Store in history
