@@ -2,7 +2,7 @@ import requests
 import ssl
 from src.kpi_runners.base import BaseKPIRunner
 from src.config.settings import DEFAULT_TIMEOUT, FLAPPING_TIMEOUT, RETRY_DELAY
-from urllib3.util.ssl_ import create_urllib3_context
+
 from requests.adapters import HTTPAdapter
 import urllib3
 
@@ -10,9 +10,11 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class GovernmentSSLAdapter(HTTPAdapter):
     def init_poolmanager(self, *args, **kwargs):
-        context = ssl.create_default_context()
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         context.check_hostname = False
         context.verify_mode = ssl.CERT_NONE
+        context.minimum_version = ssl.TLSVersion.TLSv1
+        context.set_ciphers('DEFAULT:@SECLEVEL=1')
         kwargs['ssl_context'] = context
         kwargs['assert_hostname'] = False
         return super().init_poolmanager(*args, **kwargs)
