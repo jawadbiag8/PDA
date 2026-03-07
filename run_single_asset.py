@@ -14,7 +14,7 @@ from src.scheduler.scheduler_v3 import (
     determine_target_hit_miss, DB_CONFIG
 )
 
-ASSET_ID = 2  # ead.gov.pk
+ASSET_ID = 235  # ead.gov.pk
 
 conn = mysql.connector.connect(**DB_CONFIG)
 cursor = conn.cursor(dictionary=True)

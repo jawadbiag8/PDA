@@ -1048,14 +1048,14 @@ def process_single_asset_1min(asset, kpis, incident_freq):
     return counts
 
 
-def run_1min_kpis():
+def run_1min_kpis(asset_id_filter=None):
     """Run 1-min frequency KPIs in parallel across all assets.
     No pre-check needed - KPI 1 (completely down) determines if site is down."""
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
 
     log("=" * 80)
-    log("Running KPIs with frequency: 1 min")
+    log(f"Running KPIs with frequency: 1 min" + (f" (Asset ID: {asset_id_filter})" if asset_id_filter else ""))
     log("=" * 80)
 
     try:
@@ -1065,15 +1065,20 @@ def run_1min_kpis():
         freq_row = cursor.fetchone()
         incident_frequency = int(freq_row['Name']) if freq_row else 3
 
-        cursor.execute("""
+        asset_query = """
             SELECT a.*, m."MinistryName", d."DepartmentName",
                    cl."Name" as "CitizenImpactLevel"
             FROM "Assets" a
             LEFT JOIN "Ministries" m ON a."MinistryId" = m."Id"
             LEFT JOIN "Departments" d ON a."DepartmentId" = d."Id"
             LEFT JOIN "CommonLookup" cl ON a."CitizenImpactLevelId" = cl."Id"
-            WHERE a."DeletedAt" IS NULL
-        """)
+            WHERE a."DeletedAt" IS NULL AND a."StatusId" NOT IN (17, 18)
+        """
+        if asset_id_filter:
+            asset_query += ' AND a."Id" = %s'
+            cursor.execute(asset_query, (asset_id_filter,))
+        else:
+            cursor.execute(asset_query)
         assets = cursor.fetchall()
 
         cursor.execute("""
@@ -1187,14 +1192,14 @@ def process_single_asset_5min(asset, kpis, incident_freq):
     return counts
 
 
-def run_5min_kpis():
+def run_5min_kpis(asset_id_filter=None):
     """Run 5-min frequency KPIs in parallel across all assets.
     Uses pre-check to skip down sites."""
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
 
     log("=" * 80)
-    log("Running KPIs with frequency: 5 min")
+    log(f"Running KPIs with frequency: 5 min" + (f" (Asset ID: {asset_id_filter})" if asset_id_filter else ""))
     log("=" * 80)
 
     try:
@@ -1204,15 +1209,20 @@ def run_5min_kpis():
         freq_row = cursor.fetchone()
         incident_frequency = int(freq_row['Name']) if freq_row else 3
 
-        cursor.execute("""
+        asset_query = """
             SELECT a.*, m."MinistryName", d."DepartmentName",
                    cl."Name" as "CitizenImpactLevel"
             FROM "Assets" a
             LEFT JOIN "Ministries" m ON a."MinistryId" = m."Id"
             LEFT JOIN "Departments" d ON a."DepartmentId" = d."Id"
             LEFT JOIN "CommonLookup" cl ON a."CitizenImpactLevelId" = cl."Id"
-            WHERE a."DeletedAt" IS NULL
-        """)
+            WHERE a."DeletedAt" IS NULL AND a."StatusId" NOT IN (17, 18)
+        """
+        if asset_id_filter:
+            asset_query += ' AND a."Id" = %s'
+            cursor.execute(asset_query, (asset_id_filter,))
+        else:
+            cursor.execute(asset_query)
         assets = cursor.fetchall()
 
         cursor.execute("""
@@ -1367,14 +1377,14 @@ def process_single_asset_15min(asset, non_browser_kpis, browser_kpis, incident_f
     return counts
 
 
-def run_15min_kpis():
+def run_15min_kpis(asset_id_filter=None):
     """Run 15-min frequency KPIs in parallel across all assets.
     Uses pre-check to skip down sites. Browser KPIs use SharedBrowserContext per worker."""
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
 
     log("=" * 80)
-    log("Running KPIs with frequency: 15 min")
+    log(f"Running KPIs with frequency: 15 min" + (f" (Asset ID: {asset_id_filter})" if asset_id_filter else ""))
     log("=" * 80)
 
     try:
@@ -1384,15 +1394,20 @@ def run_15min_kpis():
         freq_row = cursor.fetchone()
         incident_frequency = int(freq_row['Name']) if freq_row else 3
 
-        cursor.execute("""
+        asset_query = """
             SELECT a.*, m."MinistryName", d."DepartmentName",
                    cl."Name" as "CitizenImpactLevel"
             FROM "Assets" a
             LEFT JOIN "Ministries" m ON a."MinistryId" = m."Id"
             LEFT JOIN "Departments" d ON a."DepartmentId" = d."Id"
             LEFT JOIN "CommonLookup" cl ON a."CitizenImpactLevelId" = cl."Id"
-            WHERE a."DeletedAt" IS NULL
-        """)
+            WHERE a."DeletedAt" IS NULL AND a."StatusId" NOT IN (17, 18)
+        """
+        if asset_id_filter:
+            asset_query += ' AND a."Id" = %s'
+            cursor.execute(asset_query, (asset_id_filter,))
+        else:
+            cursor.execute(asset_query)
         assets = cursor.fetchall()
 
         cursor.execute("""
@@ -1452,7 +1467,7 @@ def run_kpis_by_frequency(frequency_filter):
             LEFT JOIN "Ministries" m ON a."MinistryId" = m."Id"
             LEFT JOIN "Departments" d ON a."DepartmentId" = d."Id"
             LEFT JOIN "CommonLookup" cl ON a."CitizenImpactLevelId" = cl."Id"
-            WHERE a."DeletedAt" IS NULL
+            WHERE a."DeletedAt" IS NULL AND a."StatusId" NOT IN (17, 18)
         """)
         assets = cursor.fetchall()
 
@@ -1752,14 +1767,14 @@ def process_single_asset_daily(asset, non_browser_kpis, browser_kpis, incident_f
     return counts
 
 
-def run_daily_kpis_parallel():
+def run_daily_kpis_parallel(asset_id_filter=None):
     """Run daily KPIs in parallel across all assets.
     Uses pre-check to skip down sites. Browser KPIs use SharedBrowserContext per worker."""
     conn = get_db_connection()
     cursor = conn.cursor(cursor_factory=RealDictCursor)
 
     log("=" * 80)
-    log(f"Running Daily KPIs (PARALLEL MODE - {PARALLEL_WORKERS} workers)")
+    log(f"Running Daily KPIs (PARALLEL MODE - {PARALLEL_WORKERS} workers)" + (f" (Asset ID: {asset_id_filter})" if asset_id_filter else ""))
     log("=" * 80)
 
     try:
@@ -1769,15 +1784,20 @@ def run_daily_kpis_parallel():
         freq_row = cursor.fetchone()
         incident_frequency = int(freq_row['Name']) if freq_row else 3
 
-        cursor.execute("""
+        asset_query = """
             SELECT a.*, m."MinistryName", d."DepartmentName",
                    cl."Name" as "CitizenImpactLevel"
             FROM "Assets" a
             LEFT JOIN "Ministries" m ON a."MinistryId" = m."Id"
             LEFT JOIN "Departments" d ON a."DepartmentId" = d."Id"
             LEFT JOIN "CommonLookup" cl ON a."CitizenImpactLevelId" = cl."Id"
-            WHERE a."DeletedAt" IS NULL
-        """)
+            WHERE a."DeletedAt" IS NULL AND a."StatusId" NOT IN (17, 18)
+        """
+        if asset_id_filter:
+            asset_query += ' AND a."Id" = %s'
+            cursor.execute(asset_query, (asset_id_filter,))
+        else:
+            cursor.execute(asset_query)
         assets = cursor.fetchall()
 
         cursor.execute("""
@@ -2056,6 +2076,7 @@ if __name__ == "__main__":
     parser.add_argument('--stop', action='store_true', help='Stop running scheduler')
     parser.add_argument('--test', action='store_true', help='Run all KPIs once (test mode)')
     parser.add_argument('--frequency', type=str, help='Run specific frequency only (e.g., "1 min", "5 min", "15 min", "Daily")')
+    parser.add_argument('--asset-id', type=int, help='Run only for a specific asset ID')
     parser.add_argument('--run-daemon', action='store_true', help=argparse.SUPPRESS)  # Internal use
 
     args = parser.parse_args()
@@ -2067,14 +2088,15 @@ if __name__ == "__main__":
     elif args.test:
         run_all_now()
     elif args.frequency:
+        asset_id_filter = args.asset_id
         if args.frequency == "1 min":
-            run_1min_kpis()
+            run_1min_kpis(asset_id_filter=asset_id_filter)
         elif args.frequency == "5 min":
-            run_5min_kpis()
+            run_5min_kpis(asset_id_filter=asset_id_filter)
         elif args.frequency == "15 min":
-            run_15min_kpis()
+            run_15min_kpis(asset_id_filter=asset_id_filter)
         elif args.frequency == "Daily":
-            run_daily_kpis_parallel()
+            run_daily_kpis_parallel(asset_id_filter=asset_id_filter)
         else:
             log(f"Unknown frequency: {args.frequency}", "error")
     elif args.run_daemon:

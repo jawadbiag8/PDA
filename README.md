@@ -10,12 +10,16 @@ Automated monitoring system for Pakistani government websites with intelligent t
 - **Automatic Incident Management** (create after consecutive failures, auto-close on recovery)
 - **UPSERT Result Storage** (snapshot + history tables)
 - **Hierarchical Asset Management** (Ministries > Departments > Assets)
+- **Asset Status Filtering** (skips assets with StatusId 17 or 18)
+- **Manual KPI Triggers** (single KPI or all KPIs per asset via API)
 
 ## Project Structure
 
 ```
 KPIs-HealthCheck/
 ├── src/
+│   ├── api/
+│   │   └── server.py            # FastAPI server for manual KPI triggers
 │   ├── scheduler/
 │   │   └── scheduler_v3.py      # Main frequency-based scheduler
 │   └── kpi_runners/
@@ -104,6 +108,9 @@ python src/scheduler/scheduler_v3.py --test
 
 # Run specific frequency only
 python src/scheduler/scheduler_v3.py --frequency "5 min"
+
+# Run specific frequency for a single asset
+python src/scheduler/scheduler_v3.py --frequency "5 min" --asset-id 232
 ```
 
 ### Schedule Configuration
@@ -121,6 +128,27 @@ Configure daily run time in `scheduler_v3.py`:
 DAILY_RUN_HOUR = 23   # 11 PM
 DAILY_RUN_MINUTE = 30
 ```
+
+## Asset Filtering
+
+Assets with `StatusId` 17 or 18 are excluded from all KPI checks (both auto-scheduler and manual triggers). These assets will not have any results stored, incidents created, or notifications sent.
+
+## API Endpoints
+
+### Manual KPI Check (Single)
+```bash
+curl -X POST http://localhost:5000/api/kpi/manual-check \
+  -H "Content-Type: application/json" \
+  -d '{"assetId": 232, "kpiId": 1}'
+```
+
+### Manual KPI Check (All KPIs for an Asset)
+```bash
+curl -X POST http://localhost:5000/api/kpi/manual-check-all \
+  -H "Content-Type: application/json" \
+  -d '{"assetId": 232}'
+```
+Runs all auto KPIs (`Manual = 'Auto'`) for the given asset in the background.
 
 ## KPI Categories
 
@@ -177,7 +205,12 @@ KPI results are evaluated against targets based on the asset's CitizenImpactLeve
 | Flag | Runner's flag directly | Site down = miss |
 | Sec | Lower is better | Result <= Target = hit |
 | MB | Lower is better | Result <= Target = hit |
-| % | Higher is better | Result >= Target = hit |
+| % | Auto-detected from targets | See below |
+
+**% Outcome Direction Detection:**
+The direction for `%` KPIs is auto-detected by comparing `TargetHigh` and `TargetLow`:
+- **TargetHigh >= TargetLow** → Higher is better (e.g., WCAG compliance: 95% high, 80% low) → `Result >= Target = hit`
+- **TargetHigh < TargetLow** → Lower is better (e.g., missing alt text: 2% high, 10% low) → `Result <= Target = hit`
 
 ### Example
 
