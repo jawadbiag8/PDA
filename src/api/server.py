@@ -424,56 +424,95 @@ def _run_manual_all_kpis(asset, non_browser_kpis, browser_kpis):
         hits = 0
         misses = 0
         skipped = 0
+        site_is_down = False
 
-        # Run non-browser KPIs first
+        # Run KPI 1 (Website completely down) first to check if site is up
+        down_kpi = None
+        remaining_non_browser = []
         for kpi in non_browser_kpis:
+            if 'completely down' in (kpi.get('KpiName', '') or '').lower():
+                down_kpi = kpi
+            else:
+                remaining_non_browser.append(kpi)
+
+        if down_kpi:
             try:
-                result = run_kpi_for_asset(cursor, asset, kpi, incident_frequency)
+                result = run_kpi_for_asset(cursor, asset, down_kpi, incident_frequency)
                 if result == "hit":
                     hits += 1
                 elif result == "miss":
                     misses += 1
+                    site_is_down = True
                 else:
                     skipped += 1
-                log(f"[MANUAL-ALL]   [{result.upper() if result else 'ERR'}] {kpi['KpiName']}")
+                log(f"[MANUAL-ALL]   [{result.upper() if result else 'ERR'}] {down_kpi['KpiName']}")
             except Exception as e:
                 skipped += 1
-                log(f"[MANUAL-ALL]   [ERROR] {kpi['KpiName']}: {str(e)}", "error")
+                log(f"[MANUAL-ALL]   [ERROR] {down_kpi['KpiName']}: {str(e)}", "error")
 
-        conn.commit()
+        # If site is down, skip all remaining KPIs
+        if site_is_down:
+            log(f"[MANUAL-ALL] Site is DOWN - skipping remaining KPIs")
+            all_remaining = remaining_non_browser + browser_kpis
+            for kpi in all_remaining:
+                skipped += 1
+                skipped_result = {'flag': True, 'value': None, 'details': 'Skipped - site is down'}
+                result_id = store_result(cursor, asset['Id'], kpi['Id'], skipped_result, kpi['Outcome'], target_override="skipped")
+                result_value = format_result_value(skipped_result, kpi['Outcome'])
+                store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, 'Skipped - site is down')
+                log(f"[MANUAL-ALL]   [SKIPPED] {kpi['KpiName']} (site is down)")
 
-        # Run browser KPIs with shared browser instance
-        if browser_kpis:
-            try:
-                with SharedBrowserContext() as ctx:
-                    page, load_time, nav_success = ctx.navigate_to(asset['AssetUrl'])
-                    if not nav_success:
-                        log(f"[MANUAL-ALL] [WARN] Page load was slow/partial, running checks anyway")
-
-                    for kpi in browser_kpis:
-                        try:
-                            result = run_browser_kpi_with_page(cursor, asset, kpi, incident_frequency, page, load_time)
-                            if result == "hit":
-                                hits += 1
-                            elif result == "miss":
-                                misses += 1
-                            else:
-                                skipped += 1
-                            log(f"[MANUAL-ALL]   [{result.upper() if result else 'ERR'}] {kpi['KpiName']}")
-                        except Exception as e:
-                            skipped += 1
-                            log(f"[MANUAL-ALL]   [ERROR] {kpi['KpiName']}: {str(e)}", "error")
-
-            except Exception as e:
-                log(f"[MANUAL-ALL] [ERROR] Browser context failed: {str(e)}", "error")
-                for kpi in browser_kpis:
+            conn.commit()
+        else:
+            # Run remaining non-browser KPIs
+            for kpi in remaining_non_browser:
+                try:
+                    result = run_kpi_for_asset(cursor, asset, kpi, incident_frequency)
+                    if result == "hit":
+                        hits += 1
+                    elif result == "miss":
+                        misses += 1
+                    else:
+                        skipped += 1
+                    log(f"[MANUAL-ALL]   [{result.upper() if result else 'ERR'}] {kpi['KpiName']}")
+                except Exception as e:
                     skipped += 1
-                    error_result = {'flag': True, 'value': None, 'details': f'Browser error: {str(e)[:200]}'}
-                    result_id = store_result(cursor, asset['Id'], kpi['Id'], error_result, kpi['Outcome'], target_override="skipped")
-                    result_value = format_result_value(error_result, kpi['Outcome'])
-                    store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, f'Browser error: {str(e)[:200]}')
+                    log(f"[MANUAL-ALL]   [ERROR] {kpi['KpiName']}: {str(e)}", "error")
 
-        conn.commit()
+            conn.commit()
+
+            # Run browser KPIs with shared browser instance
+            if browser_kpis:
+                try:
+                    with SharedBrowserContext() as ctx:
+                        page, load_time, nav_success = ctx.navigate_to(asset['AssetUrl'])
+                        if not nav_success:
+                            log(f"[MANUAL-ALL] [WARN] Page load was slow/partial, running checks anyway")
+
+                        for kpi in browser_kpis:
+                            try:
+                                result = run_browser_kpi_with_page(cursor, asset, kpi, incident_frequency, page, load_time)
+                                if result == "hit":
+                                    hits += 1
+                                elif result == "miss":
+                                    misses += 1
+                                else:
+                                    skipped += 1
+                                log(f"[MANUAL-ALL]   [{result.upper() if result else 'ERR'}] {kpi['KpiName']}")
+                            except Exception as e:
+                                skipped += 1
+                                log(f"[MANUAL-ALL]   [ERROR] {kpi['KpiName']}: {str(e)}", "error")
+
+                except Exception as e:
+                    log(f"[MANUAL-ALL] [ERROR] Browser context failed: {str(e)}", "error")
+                    for kpi in browser_kpis:
+                        skipped += 1
+                        error_result = {'flag': True, 'value': None, 'details': f'Browser error: {str(e)[:200]}'}
+                        result_id = store_result(cursor, asset['Id'], kpi['Id'], error_result, kpi['Outcome'], target_override="skipped")
+                        result_value = format_result_value(error_result, kpi['Outcome'])
+                        store_in_results_history(cursor, asset['Id'], result_id, kpi['Id'], "skipped", result_value, f'Browser error: {str(e)[:200]}')
+
+            conn.commit()
 
         # Recalculate metrics
         recalculate_asset_metrics(cursor, asset['Id'], asset.get('CitizenImpactLevel'))
