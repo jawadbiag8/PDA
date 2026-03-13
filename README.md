@@ -131,7 +131,7 @@ DAILY_RUN_MINUTE = 30
 
 ## Asset Filtering
 
-Assets with `StatusId` 17 or 18 are excluded from all KPI checks (both auto-scheduler and manual triggers). These assets will not have any results stored, incidents created, or notifications sent.
+Assets with `StatusId` 17 (Retired) or 18 (Suspended) are excluded from the **auto-scheduler** only. Manual triggers via API are still allowed for any asset, enabling users to check retired/suspended assets on demand.
 
 ## API Endpoints
 

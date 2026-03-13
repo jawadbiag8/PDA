@@ -219,7 +219,7 @@ def manual_kpi_check(request: ManualCheckRequest):
             SELECT a.*, cl."Name" as "CitizenImpactLevel"
             FROM "Assets" a
             LEFT JOIN "CommonLookup" cl ON a."CitizenImpactLevelId" = cl."Id"
-            WHERE a."Id" = %s AND a."DeletedAt" IS NULL AND a."StatusId" NOT IN (17, 18)
+            WHERE a."Id" = %s AND a."DeletedAt" IS NULL
         """, (request.assetId,))
         asset = cursor.fetchone()
 
@@ -350,7 +350,7 @@ def manual_kpi_check_all(request: ManualCheckAllRequest):
             SELECT a.*, cl."Name" as "CitizenImpactLevel"
             FROM "Assets" a
             LEFT JOIN "CommonLookup" cl ON a."CitizenImpactLevelId" = cl."Id"
-            WHERE a."Id" = %s AND a."DeletedAt" IS NULL AND a."StatusId" NOT IN (17, 18)
+            WHERE a."Id" = %s AND a."DeletedAt" IS NULL
         """, (request.assetId,))
         asset = cursor.fetchone()
 
