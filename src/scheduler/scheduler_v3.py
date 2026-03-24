@@ -75,6 +75,30 @@ BACKEND_USERNAME = os.getenv("BACKEND_USERNAME", "")
 BACKEND_PASSWORD = os.getenv("BACKEND_PASSWORD", "")
 
 # ============================================================
+# INCIDENT STATUS IDS (loaded from DB at startup)
+# ============================================================
+
+# Fallback values match current DB — updated by load_incident_status_ids()
+INCIDENT_STATUS = {'Open': 8, 'Resolved': 9, 'Archived': 10}
+
+def load_incident_status_ids():
+    """Load incident status IDs from CommonLookup WHERE Type = 'Status'"""
+    global INCIDENT_STATUS
+    try:
+        conn = psycopg2.connect(**DB_CONFIG)
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute("""
+                SELECT "Id", "Name" FROM "CommonLookup" WHERE "Type" = 'Status'
+            """)
+            rows = cursor.fetchall()
+            if rows:
+                INCIDENT_STATUS = {row['Name']: row['Id'] for row in rows}
+        conn.close()
+        print(f"[INIT] Loaded incident status IDs: {INCIDENT_STATUS}")
+    except Exception as e:
+        print(f"[ERROR] Failed to load incident status IDs, using fallback: {str(e)}")
+
+# ============================================================
 # LOGGING SETUP
 # ============================================================
 
@@ -417,8 +441,8 @@ def auto_close_incident(cursor, asset_id, kpi_id):
             SELECT "Id", "AssetId", "KpiId", "IncidentTitle", "Description",
                    "Type", "SeverityId", "AssignedTo"
             FROM "Incidents"
-            WHERE "AssetId" = %s AND "KpiId" = %s AND "StatusId" = 8 AND "Type" = 'auto'
-        """, (asset_id, kpi_id))
+            WHERE "AssetId" = %s AND "KpiId" = %s AND "StatusId" = %s AND "Type" = 'auto'
+        """, (asset_id, kpi_id, INCIDENT_STATUS['Open']))
 
         incidents = cursor.fetchall()
         closed_count = 0
@@ -427,17 +451,17 @@ def auto_close_incident(cursor, asset_id, kpi_id):
         for incident in incidents:
             cursor.execute("""
                 UPDATE "Incidents"
-                SET "StatusId" = 12, "UpdatedAt" = NOW(), "UpdatedBy" = 'system'
+                SET "StatusId" = %s, "UpdatedAt" = NOW(), "UpdatedBy" = 'system'
                 WHERE "Id" = %s
-            """, (incident['Id'],))
+            """, (INCIDENT_STATUS['Resolved'], incident['Id']))
 
             # Insert into IncidentHistories (audit trail)
             cursor.execute("""
                 INSERT INTO "IncidentHistories" ("AssetId", "IncidentId", "KpiId", "IncidentTitle", "Description",
                                                   "Type", "SeverityId", "StatusId", "AssignedTo", "CreatedBy", "CreatedAt")
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 12, %s, 'System Generated', NOW())
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'System Generated', NOW())
             """, (incident['AssetId'], incident['Id'], incident['KpiId'], incident['IncidentTitle'],
-                  incident['Description'], incident['Type'], incident['SeverityId'], incident['AssignedTo']))
+                  incident['Description'], incident['Type'], incident['SeverityId'], INCIDENT_STATUS['Resolved'], incident['AssignedTo']))
 
             # Insert into IncidentComments
             cursor.execute("""
@@ -506,9 +530,9 @@ def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
         # Check for existing open incident first (fast path)
         cursor.execute("""
             SELECT "Id" FROM "Incidents"
-            WHERE "AssetId" = %s AND "KpiId" = %s AND "StatusId" = 8 AND "DeletedAt" IS NULL
+            WHERE "AssetId" = %s AND "KpiId" = %s AND "StatusId" = %s AND "DeletedAt" IS NULL
             LIMIT 1
-        """, (asset_id, kpi_id))
+        """, (asset_id, kpi_id, INCIDENT_STATUS['Open']))
 
         existing_incident = cursor.fetchone()
 
@@ -517,18 +541,19 @@ def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
 
         incident_title = f"{kpi_name} - Breach"
         description = f"{kpi_name} - Auto Created Incident"
+        open_id = INCIDENT_STATUS['Open']
 
         # Race-safe insert: ON CONFLICT DO NOTHING prevents duplicate if another
         # thread inserted between our SELECT and this INSERT
-        cursor.execute("""
+        cursor.execute(f"""
             INSERT INTO "Incidents" ("AssetId", "KpiId", "IncidentTitle", "Description",
                                      "Type", "SeverityId", "StatusId", "AssignedTo", "CreatedBy", "CreatedAt",
                                      "DeletedAt")
-            VALUES (%s, %s, %s, %s, 'auto', %s, 8, 'pda@dams.com', 'System Generated', NOW(), NULL)
-            ON CONFLICT ("AssetId", "KpiId") WHERE "StatusId" = 8 AND "DeletedAt" IS NULL
+            VALUES (%s, %s, %s, %s, 'auto', %s, %s, 'pda@dams.com', 'System Generated', NOW(), NULL)
+            ON CONFLICT ("AssetId", "KpiId") WHERE "StatusId" = {open_id} AND "DeletedAt" IS NULL
             DO NOTHING
             RETURNING "Id"
-        """, (asset_id, kpi_id, incident_title, description, severity_id))
+        """, (asset_id, kpi_id, incident_title, description, severity_id, open_id))
 
         row = cursor.fetchone()
 
@@ -536,9 +561,9 @@ def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
             # ON CONFLICT triggered — another thread already created it; fetch it
             cursor.execute("""
                 SELECT "Id" FROM "Incidents"
-                WHERE "AssetId" = %s AND "KpiId" = %s AND "StatusId" = 8 AND "DeletedAt" IS NULL
+                WHERE "AssetId" = %s AND "KpiId" = %s AND "StatusId" = %s AND "DeletedAt" IS NULL
                 LIMIT 1
-            """, (asset_id, kpi_id))
+            """, (asset_id, kpi_id, open_id))
             existing = cursor.fetchone()
             if existing:
                 return existing['Id'], False
@@ -550,8 +575,8 @@ def create_incident(cursor, asset_id, kpi_id, kpi_name, severity_id):
         cursor.execute("""
             INSERT INTO "IncidentHistories" ("AssetId", "IncidentId", "KpiId", "IncidentTitle", "Description",
                                               "Type", "SeverityId", "StatusId", "AssignedTo", "CreatedBy", "CreatedAt")
-            VALUES (%s, %s, %s, %s, %s, 'auto', %s, 8, 'pda@dams.com', 'System Generated', NOW())
-        """, (asset_id, incident_id, kpi_id, incident_title, description, severity_id))
+            VALUES (%s, %s, %s, %s, %s, 'auto', %s, %s, 'pda@dams.com', 'System Generated', NOW())
+        """, (asset_id, incident_id, kpi_id, incident_title, description, severity_id, open_id))
 
         # Insert into IncidentComments
         cursor.execute("""
@@ -743,7 +768,7 @@ def recalculate_asset_metrics(cursor, asset_id, citizen_impact_level):
             if sev_name not in incident_counts:
                 incident_counts[sev_name] = {'open': 0, 'total': 0}
             incident_counts[sev_name]['total'] += row['cnt']
-            if row['StatusId'] == 8:
+            if row['StatusId'] == INCIDENT_STATUS['Open']:
                 incident_counts[sev_name]['open'] += row['cnt']
 
         # Map severity names to DREI categories
@@ -1961,7 +1986,7 @@ def start_scheduler():
     _scheduler.add_job(job_1_minute, IntervalTrigger(minutes=3), id='kpi_1min', name='1-minute KPIs',
                        coalesce=True, max_instances=1, misfire_grace_time=60)
     _scheduler.add_job(job_5_minute, IntervalTrigger(minutes=10), id='kpi_5min', name='5-minute KPIs',
-                       coalesce=True, max_instances=1, misfire_grace_time=120)
+                       coalesce=True, max_instances=1, misfire_grace_time=0)
     _scheduler.add_job(job_15_minute, IntervalTrigger(minutes=20), id='kpi_15min', name='15-minute KPIs',
                        coalesce=True, max_instances=1, misfire_grace_time=180)
     _scheduler.add_job(job_daily, CronTrigger(hour=DAILY_RUN_HOUR, minute=DAILY_RUN_MINUTE), id='kpi_daily', name='Daily KPIs',
@@ -2070,6 +2095,8 @@ def start_daemon():
 
 if __name__ == "__main__":
     import argparse
+
+    load_incident_status_ids()
 
     parser = argparse.ArgumentParser(description='KPI Monitoring Scheduler v3')
     parser.add_argument('--start', action='store_true', help='Start scheduler as background process')
