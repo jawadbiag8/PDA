@@ -1986,7 +1986,7 @@ def start_scheduler():
     _scheduler.add_job(job_1_minute, IntervalTrigger(minutes=3), id='kpi_1min', name='1-minute KPIs',
                        coalesce=True, max_instances=1, misfire_grace_time=60)
     _scheduler.add_job(job_5_minute, IntervalTrigger(minutes=10), id='kpi_5min', name='5-minute KPIs',
-                       coalesce=True, max_instances=1, misfire_grace_time=0)
+                       coalesce=True, max_instances=1, misfire_grace_time=None)
     _scheduler.add_job(job_15_minute, IntervalTrigger(minutes=20), id='kpi_15min', name='15-minute KPIs',
                        coalesce=True, max_instances=1, misfire_grace_time=180)
     _scheduler.add_job(job_daily, CronTrigger(hour=DAILY_RUN_HOUR, minute=DAILY_RUN_MINUTE), id='kpi_daily', name='Daily KPIs',
